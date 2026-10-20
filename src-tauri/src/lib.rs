@@ -1444,7 +1444,7 @@ async fn update_install(
 }
 
 /// rsrs 令牌：环境变量优先（RSRS_TOKEN > RSRS_AUTH_TOKEN），否则用配置
-fn resolve_rsrs_token(cfg: &config::RsrsConfig) -> String {
+pub(crate) fn resolve_rsrs_token(cfg: &config::RsrsConfig) -> String {
     for key in ["RSRS_TOKEN", "RSRS_AUTH_TOKEN"] {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim();

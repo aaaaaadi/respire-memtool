@@ -100,7 +100,7 @@ pub fn start(cfg: AppConfig, token_path: PathBuf, backup_dir: PathBuf) -> Result
             cfg.rsrs.timeout_secs,
             cfg.rsrs.op_timeout_secs,
         )
-        .with_token(cfg.rsrs.auth_token.clone());
+        .with_token(crate::resolve_rsrs_token(&cfg.rsrs));
         for request in server.incoming_requests() {
             handle(request, &client, &cfg, &thread_token, &backup_dir);
         }
