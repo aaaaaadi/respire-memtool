@@ -266,6 +266,7 @@ struct AppConfigOut {
     reminder_enabled: bool,
     /// 当前平台是否支持全局划词悬浮（非 Windows 前端应隐藏该功能）
     selection_supported: bool,
+    update_check_on_start: bool,
 }
 
 #[tauri::command]
@@ -279,6 +280,7 @@ fn get_app_config(state: tauri::State<'_, AppState>) -> AppConfigOut {
         llm_enabled: state.config.automation.llm.enabled,
         reminder_enabled: state.config.reminder.enabled,
         selection_supported: cfg!(windows),
+        update_check_on_start: state.config.update.check_on_start,
     }
 }
 

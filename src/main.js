@@ -108,6 +108,7 @@ let appConfig = {
   submit_close: true,
   port: 15169,
   selection_supported: false,
+  update_check_on_start: true,
 };
 let runtimeStatus = null;
 
@@ -1469,7 +1470,7 @@ async function init() {
       updateBody.textContent = "正在重启…";
     });
   } catch (_) {}
-  checkUpdate(false);
+  if (appConfig.update_check_on_start !== false) checkUpdate(false);
 
   // 提醒：后台扫描线程每 interval 分钟广播到期计数
   try {
