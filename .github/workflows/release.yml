@@ -134,6 +134,14 @@ jobs:
 
           jq . release-assets/update.json
 
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Publish release
         shell: bash
         env:

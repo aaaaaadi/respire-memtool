@@ -201,7 +201,7 @@ debug 构建会在第 3 项之前额外读取源码目录的 `src-tauri/config.t
 1. 同时修改 `package.json` 和 `src-tauri/tauri.conf.json` 的版本号。
 2. 提交改动。
 3. 创建并推送标签：`git tag vX.Y.Z`，`git push origin vX.Y.Z`。
-4. GitHub Actions 在 `windows-latest` 上运行 `npm test` 和 `npm run tauri build`，创建 Release，上传独立 exe、MSI/NSIS 安装包和 `update.json`。
+4. GitHub Actions 在 `windows-latest`、`macos-latest`、`ubuntu-22.04` 上分别构建，创建 Release，上传 Windows 独立 exe / MSI / NSIS、macOS dmg、Linux deb / AppImage、`update.json` 和 `SHA256SUMS`。
 
 标签必须与 `package.json` 版本一致（`v` 前缀），否则工作流会失败。也可通过 `workflow_dispatch` 手动触发。
 
