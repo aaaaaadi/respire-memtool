@@ -14,8 +14,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: msi,nsis
+            artifact: windows
+          - os: macos-latest
+            bundles: app,dmg
+            artifact: macos
+          - os: ubuntu-22.04
+            bundles: deb,appimage
+            artifact: linux
     env:
       CARGO_TERM_COLOR: always
 
@@ -33,60 +48,102 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Resolve version
-        id: version
-        shell: pwsh
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($env:GITHUB_EVENT_NAME -eq 'push' -and "${{ github.ref_name }}" -ne "v$version") {
-            throw "Tag ${{ github.ref_name }} does not match package.json version v$version"
-          }
-          "value=$version" >> $env:GITHUB_OUTPUT
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libfuse2 \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            libxdo-dev
 
       - run: npm ci
 
       - run: npm test
 
-      - run: npm run tauri build
+      - run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
-      - name: Stage release assets
-        shell: pwsh
+      - name: Stage assets
+        shell: bash
         run: |
-          $version = "${{ steps.version.outputs.value }}"
-          $stage = "release-assets"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          mkdir -p release-assets
 
-          $exe = "src-tauri/target/release/memtools.exe"
-          if (-not (Test-Path $exe)) { throw "Missing $exe" }
-          $assetName = "memtools-$version.exe"
-          Copy-Item $exe (Join-Path $stage $assetName)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp src-tauri/target/release/memtools.exe "release-assets/memtools-$VERSION.exe"
+          fi
 
-          Get-ChildItem "src-tauri/target/release/bundle" -Recurse -File -Include *.msi,*.exe -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike "memtools-$version.exe" } |
-            ForEach-Object { Copy-Item $_.FullName (Join-Path $stage $_.Name) -Force }
+          find src-tauri/target/release/bundle -type f \
+            \( -iname '*.msi' -o -iname '*setup.exe' -o -iname '*.dmg' -o -iname '*.deb' -o -iname '*.AppImage' \) \
+            -exec cp {} release-assets/ \;
 
-          $file = Get-Item (Join-Path $stage $assetName)
-          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
-          $releaseUrl = "https://github.com/risense-ai/respire-memtool/releases/download/v$version/$assetName"
-          $manifest = [ordered]@{
-            version   = $version
-            notes     = "See https://github.com/risense-ai/respire-memtool/releases/tag/v$version"
-            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            url       = $releaseUrl
-            sha256    = $hash
-            size      = $file.Length
-            mandatory = $false
+          ls -l release-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate update manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r .version package.json)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version v$VERSION"
+            exit 1
+          fi
+
+          EXE="release-assets/memtools-$VERSION.exe"
+          test -f "$EXE"
+          SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          SIZE="$(stat -c%s "$EXE")"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          RELEASE_URL="https://github.com/risense-ai/respire-memtool/releases/tag/v$VERSION"
+
+          cat > release-assets/update.json <<EOF
+          {
+            "version": "$VERSION",
+            "notes": "See $RELEASE_URL",
+            "pub_date": "$PUB_DATE",
+            "url": "https://github.com/risense-ai/respire-memtool/releases/download/v$VERSION/memtools-$VERSION.exe",
+            "sha256": "$SHA",
+            "size": $SIZE,
+            "mandatory": false
           }
-          $manifest | ConvertTo-Json | Set-Content (Join-Path $stage "update.json") -Encoding utf8NoBOM
+          EOF
 
-          Get-ChildItem $stage -File | Select-Object Name, Length | Format-Table
+          jq . release-assets/update.json
 
-      - name: Publish GitHub Release
-        shell: pwsh
+      - name: Publish release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${{ steps.version.outputs.value }}"
-          $tag = "v$version"
-          $assets = (Get-ChildItem "release-assets" -File | ForEach-Object { $_.FullName })
-          gh release create $tag --title "memTools $tag" --generate-notes @assets
+          set -euo pipefail
+          VERSION="$(jq -r .version package.json)"
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" --title "memTools $TAG" --generate-notes release-assets/*
+          fi

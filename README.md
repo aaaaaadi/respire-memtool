@@ -48,6 +48,8 @@ memTools 是一个基于 Tauri 2 的桌面快捷记录工具：用全局热键�
 
 首次启动时，如果可执行文件旁和用户配置目录都没有 `config.toml`，应用会把内置模板写入用户配置目录。之后可编辑该文件调整热键、端口、自动化等行为。
 
+发布包未做商业代码签名：Windows 可能提示“未知发布者”，macOS 需在“系统设置 → 隐私与安全性”中允许打开。macOS 构建为 Apple Silicon（arm64）版本。
+
 ## 快速上手
 
 1. 确认 rsrs runtime 已启动，再运行 memTools。
@@ -246,7 +248,10 @@ npm run tauri build -- --no-bundle
 - 全局划词悬浮仅支持 Windows；需要 `Ctrl+Shift+C` 复制的终端类应用可能取不到选中文字。
 - 自动更新的下载与安装仅支持 Windows，其他平台需手动下载。
 - 没有账号切换器；切换账号需要调整 `rsrs.base_url` 或让目标账号占用同一端口。
+- 发布包未签名；macOS 构建仅覆盖 arm64。
 
 ## 许可证
 
-MIT，Copyright (c) 2026 risense-ai。第三方组件及其许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+源代码与文档采用 MIT，Copyright (c) 2026 risense-ai。第三方组件及其许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+`src/graph/assets/brain2.container.ply` 不在此许可范围内，仅限本项目使用，详见 [ASSETS.md](ASSETS.md)。

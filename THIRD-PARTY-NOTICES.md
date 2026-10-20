@@ -36,7 +36,7 @@ memTools 以 MIT 许可证发布。应用在构建和运行时会使用下列第
 
 ## 可视化资源
 
-`src/graph/assets/brain2.container.ply` 是本仓库随附的 3D 可视化资源，按本项目的 MIT 许可证分发。
+`src/graph/assets/brain2.container.ply` 由项目作者自制，**不属于 MIT 许可范围**，仅授权在本项目中使用，不得用于其它项目或单独再分发。详见 [ASSETS.md](ASSETS.md)。
 
 ## 说明
 
