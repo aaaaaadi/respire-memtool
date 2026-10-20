@@ -1,0 +1,53 @@
+[package]
+name = "memtools"
+version = "0.3.1"
+description = "memTools - rsrs 桌面快捷记忆小工具"
+authors = ["memTools"]
+edition = "2021"
+
+[lib]
+name = "memtools_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+toml = "0.8"
+tauri-plugin-single-instance = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 扩展端点令牌：UUID v4（CSPRNG）
+uuid = { version = "1", features = ["v4"] }
+# 浏览器扩展的本机 HTTP 入口（仅 127.0.0.1，同步阻塞，轻量）
+tiny_http = "0.12"
+# 图谱数据层：只读打开 rsrs 的 onememory.db（WAL 安全）
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 解压 core-index 中的 zlib(JSON) m3 向量工件
+flate2 = "1"
+# 更新包完整性校验（SHA-256）
+sha2 = "0.10"
+# 只取文本，不启用图像剪贴板特性（体积更小）
+arboard = { version = "3", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# 全局划词（P8）：Win32 鼠标钩子 / SendInput / 剪贴板序列号 / 显示器工作区
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Graphics_Gdi",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

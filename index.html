@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>memTools</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app" class="shell">
+    <!-- 顶栏：拖拽区 + 动作 -->
+    <header class="titlebar" id="titlebar">
+      <div class="brand">
+        <span class="logo-dot"></span>
+        <span class="brand-name">memTools</span>
+        <span class="brand-sub">rsrs 记忆</span>
+      </div>
+      <div class="titlebar-actions">
+        <button id="btn-min" class="tb-btn" title="隐藏到托盘">—</button>
+        <button id="btn-close" class="tb-btn tb-close" title="隐藏到托盘 (Esc)">✕</button>
+      </div>
+    </header>
+
+    <!-- 视图切换 -->
+    <nav class="view-tabs" id="view-tabs">
+      <button class="view-tab active" data-view="write">记录</button>
+      <button class="view-tab" data-view="browse">最近记忆</button>
+      <button class="view-tab" data-view="search">搜索</button>
+      <button class="view-tab" data-view="remind">
+        提醒<i id="remind-badge" class="tab-badge hidden">0</i>
+      </button>
+      <button class="view-tab" data-view="graph">图谱</button>
+    </nav>
+
+    <!-- 输入区 -->
+    <main class="content" id="view-write">
+      <div class="input-modes" id="input-modes">
+        <button class="mode-btn active" data-mode="free">自由文本</button>
+        <button class="mode-btn" data-mode="sections">三段模板</button>
+      </div>
+
+      <div class="input-wrap">
+        <textarea id="memory-input" rows="3" placeholder="记录此刻的想法 / 事件 / 决策…&#10;（主区条目建议包含：【前因】【行为】【后果】）" spellcheck="false"></textarea>
+      </div>
+
+      <!-- 三段模板（仅「三段模板」模式显示） -->
+      <div class="sections-wrap hidden" id="sections-wrap">
+        <label class="sec-field">
+          <span class="sec-tag">前因</span>
+          <textarea id="sec-cause" rows="2" placeholder="背景 / 起因（可留空）" spellcheck="false"></textarea>
+        </label>
+        <label class="sec-field">
+          <span class="sec-tag">行为</span>
+          <textarea id="sec-action" rows="2" placeholder="做了什么（必填）" spellcheck="false"></textarea>
+        </label>
+        <label class="sec-field">
+          <span class="sec-tag">后果</span>
+          <textarea id="sec-effect" rows="2" placeholder="结果 / 结论（可留空）" spellcheck="false"></textarea>
+        </label>
+      </div>
+
+      <div class="input-meta">
+        <span id="char-count">0 字</span>
+        <span class="hint">Ctrl+Enter 提交 · Esc 关闭</span>
+      </div>
+
+      <!-- task 类型：【触发】行（日期不猜，缺失时询问） -->
+      <div class="trigger-row hidden" id="trigger-row">
+        <span class="trigger-label">【触发】</span>
+        <input id="trigger-input" type="text" placeholder="2026-10-20 10:00 或 可核实前提（勿猜）" spellcheck="false" />
+      </div>
+
+      <!-- 自动化提示词（仅自动化开启时显示） -->
+      <div class="hint-wrap hidden" id="hint-wrap">
+        <input id="hint-input" type="text" placeholder="项目名 / 关键词（可选，提升判重准确度）" spellcheck="false" />
+      </div>
+
+      <!-- 层一：去向 -->
+      <section class="menu-level" id="level-1">
+        <div class="level-label">存到哪里</div>
+        <div class="seg">
+          <button class="seg-btn active" data-target="main">主区 <em>important</em></button>
+          <button class="seg-btn" data-target="journal">日记 <em>trivial</em></button>
+        </div>
+      </section>
+
+      <!-- 层二：分类树（仅主区） -->
+      <section class="menu-level hidden" id="level-2">
+        <div class="level-label">挂哪棵树</div>
+        <div id="tree-groups" class="tree-groups"></div>
+      </section>
+
+      <!-- 层三：type（仅主区，可选） -->
+      <section class="menu-level hidden" id="level-3">
+        <div class="level-label">性质标记 <em class="optional">可选</em></div>
+        <div id="type-pills" class="type-pills"></div>
+      </section>
+
+      <!-- 结果 / 错误区 -->
+      <section id="result-area" class="result-area hidden"></section>
+    </main>
+
+    <!-- 最近记忆浏览 -->
+    <main class="content hidden" id="view-browse">
+      <div class="browse-toolbar">
+        <label class="browse-count" title="显示条数（1-200，默认 20）">
+          <span>数量</span>
+          <input id="browse-count" type="number" min="1" max="200" step="1" value="20" />
+        </label>
+        <button id="browse-refresh" class="mini-btn">刷新</button>
+        <span id="browse-status" class="browse-status"></span>
+      </div>
+
+      <div class="browse-cats" id="browse-cats"></div>
+      <div class="browse-list" id="browse-list"></div>
+    </main>
+
+    <!-- 记忆搜索：内容语义匹配 / id 精确命中 -->
+    <main class="content hidden" id="view-search">
+      <div class="search-toolbar">
+        <input id="search-input" type="text" placeholder="内容语义搜索，或粘贴 id（如 bd22ad3a）" spellcheck="false" />
+        <button id="search-btn" class="mini-btn primary">搜索</button>
+      </div>
+      <div class="browse-toolbar">
+        <label class="browse-count" title="语义搜索返回条数（1-100，默认 20）">
+          <span>数量</span>
+          <input id="search-count" type="number" min="1" max="100" step="1" value="20" />
+        </label>
+        <span id="search-status" class="browse-status"></span>
+      </div>
+      <div class="browse-list" id="search-list"></div>
+    </main>
+
+    <!-- 提醒：含【触发】日期的 task 到期核对 -->
+    <main class="content hidden" id="view-remind">
+      <div class="browse-toolbar">
+        <span id="remind-status" class="browse-status"></span>
+        <button id="remind-refresh" class="mini-btn">刷新</button>
+      </div>
+      <div class="remind-groups" id="remind-groups"></div>
+    </main>
+
+    <!-- 3D 图谱：demo6 风格的记忆点云 + 实时增量 -->
+    <main class="content graph-content hidden" id="view-graph">
+      <div class="graph-toolbar">
+        <span id="graph-status" class="graph-status">尚未加载</span>
+        <div class="graph-actions">
+          <label class="graph-switch" title="显示 / 隐藏大脑容器">
+            <span class="switch">
+              <input type="checkbox" id="graph-container-switch" checked />
+              <span class="knob"></span>
+            </span>
+            <span class="switch-label">容器</span>
+          </label>
+          <div class="graph-menu-wrap">
+            <button id="graph-display" class="mini-btn" title="显示与聚焦层级">显示</button>
+            <div class="graph-menu hidden" id="graph-menu">
+              <label class="graph-menu-row">
+                <input type="checkbox" id="graph-idle-dim" checked />
+                <span>非聚焦时半透明</span>
+              </label>
+              <div class="graph-menu-row">
+                <span class="graph-menu-label">点亮层级</span>
+                <input
+                  id="graph-levels-input"
+                  class="graph-num"
+                  type="number"
+                  min="1"
+                  max="6"
+                  step="1"
+                  value="3"
+                  title="向邻居最多下探几层（1-6）"
+                />
+              </div>
+              <div class="graph-menu-row">
+                <span class="graph-menu-label">最多节点</span>
+                <input
+                  id="graph-max-nodes"
+                  class="graph-num"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  value="20"
+                  title="单次聚焦最多点亮多少节点；整层放不下时少显示一层"
+                />
+              </div>
+            </div>
+          </div>
+          <button id="graph-zoom" class="mini-btn" title="视角自适应">适配</button>
+          <button id="graph-rotate" class="mini-btn" title="自动旋转">自转</button>
+          <button id="graph-rebuild" class="mini-btn" title="重新计算 PCA 布局">重排</button>
+          <button id="graph-reload" class="mini-btn" title="重新拉取全量快照">重载</button>
+          <button id="graph-expand" class="mini-btn" title="放大 / 还原窗口">放大</button>
+        </div>
+      </div>
+      <div class="graph-stage" id="graph-stage">
+        <!-- 3d-force-graph 会清空自己的挂载容器，故单独放一层，避免把覆盖层一起清掉 -->
+        <div class="graph-canvas" id="graph-canvas"></div>
+        <div class="graph-loading hidden" id="graph-loading">
+          <span class="graph-spinner"></span>
+          <span id="graph-loading-text">正在构建 3D 图谱…</span>
+        </div>
+        <div class="graph-empty hidden" id="graph-empty"></div>
+        <div class="graph-detail hidden" id="graph-detail"></div>
+        <div class="graph-legend" id="graph-legend">
+          <span><i class="lg-line parent"></i>父子</span>
+          <span><i class="lg-line core"></i>共现</span>
+          <span><i class="lg-dot"></i>大小=召回热度</span>
+          <span class="lg-hint">拖拽旋转 · 滚轮缩放 · 悬停聚焦 · 点击锁定</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- 底栏：自动化开关 + 扩展入口 -->
+    <footer class="statusbar">
+      <label class="switch-row" title="本地判档 / 判重 / 判树（无需 API Key；语义检索由 rsrs 本地模型提供）">
+        <span class="switch-label">自动化</span>
+        <span class="switch">
+          <input type="checkbox" id="auto-switch" />
+          <span class="knob"></span>
+        </span>
+        <span class="switch-state" id="auto-state">手动</span>
+      </label>
+      <button id="update-btn" class="mini-btn update-btn" title="检查更新">更新</button>
+      <button id="ext-btn" class="mini-btn ext-btn" title="浏览器扩展接入信息">扩展</button>
+      <span id="sync-badge" class="sync-badge hidden" title="rsrs 同步状态"></span>
+      <span
+        id="index-badge"
+        class="index-badge hidden"
+        role="button"
+        tabindex="0"
+        title=""
+      ></span>
+      <span id="runtime-dot" class="runtime-dot" title="rsrs runtime 状态"></span>
+    </footer>
+
+    <!-- 浏览器扩展接入面板 -->
+    <div id="ext-panel" class="ext-panel hidden">
+      <div class="ext-title">浏览器扩展</div>
+      <div class="ext-row">
+        <span>端口</span>
+        <code id="ext-port">-</code>
+      </div>
+      <div class="ext-row">
+        <span>令牌</span>
+        <input id="ext-token" type="text" readonly spellcheck="false" />
+      </div>
+      <div class="ext-actions">
+        <button id="ext-copy" class="mini-btn primary">复制令牌</button>
+        <button id="ext-close" class="mini-btn">关闭</button>
+      </div>
+      <div class="ext-hint">
+        Chrome / Edge 开发者模式加载 <code>extension/</code>，在扩展选项里填入端口与令牌。
+      </div>
+    </div>
+
+    <!-- 自动更新面板 -->
+    <div id="update-pop" class="update-pop hidden">
+      <div class="update-head">
+        <span id="update-title">检查更新</span>
+        <button id="update-close" class="mini-btn update-close" title="关闭">×</button>
+      </div>
+      <div class="update-body" id="update-body">尚未检查</div>
+      <div class="update-bar hidden" id="update-bar"><i id="update-bar-fill"></i></div>
+      <div class="update-actions">
+        <button id="update-install" class="mini-btn primary hidden">下载并重启</button>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

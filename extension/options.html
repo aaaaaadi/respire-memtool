@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>memTools 扩展设置</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1117;
+        --panel: #181b26;
+        --border: #2a2f3f;
+        --text: #e8eaf2;
+        --dim: #9aa0b4;
+        --accent: #7c5cff;
+        --ok: #34d399;
+        --err: #ff6b81;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 28px 20px;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      main { max-width: 560px; margin: 0 auto; }
+      h1 { font-size: 18px; margin: 0 0 6px; }
+      p.lead { color: var(--dim); margin: 0 0 20px; }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      label { display: block; margin-bottom: 14px; }
+      label span { display: block; color: var(--dim); margin-bottom: 6px; }
+      input {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #0d1018;
+        color: var(--text);
+        font: inherit;
+      }
+      input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      button {
+        padding: 8px 16px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #222736;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:hover { filter: brightness(1.12); }
+      #status { margin-top: 14px; min-height: 22px; }
+      #status.ok { color: var(--ok); }
+      #status.err { color: var(--err); }
+      code {
+        background: #0d1018;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1px 5px;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+        word-break: break-all;
+      }
+      ol { color: var(--dim); padding-left: 20px; margin: 10px 0 0; }
+      ol li { margin: 4px 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>memTools 记忆捕获</h1>
+      <p class="lead">把网页选中文字保存到本机 rsrs 记忆库。仅访问 127.0.0.1。</p>
+
+      <div class="card">
+        <label>
+          <span>端点端口（config.toml 的 [extension] port）</span>
+          <input id="port" type="number" min="1" max="65535" value="17650" />
+        </label>
+        <label>
+          <span>令牌（extension_token.txt 的内容）</span>
+          <input id="token" type="text" placeholder="粘贴 32 位令牌" spellcheck="false" />
+        </label>
+        <div class="row">
+          <button id="save" class="primary">保存</button>
+          <button id="test">测试连接</button>
+        </div>
+        <div id="status"></div>
+      </div>
+
+      <ol>
+        <li>先启动 memTools（托盘常驻）。</li>
+        <li>令牌文件位置：<code>%APPDATA%\com.memtools.desktop\extension_token.txt</code></li>
+        <li>若 config.toml 里写了固定 token，则直接填那个值。</li>
+        <li>保存后，在任意网页选中文字 → 右键 →「保存到 memTools」。</li>
+      </ol>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

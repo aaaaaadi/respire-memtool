@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>memTools · 3D 图谱渲染自测</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #070a11; overflow: hidden; }
+    #stage { position: absolute; inset: 0; }
+    #hud {
+      position: absolute; left: 12px; top: 12px; z-index: 10;
+      color: #9aa3b8; font: 12px/1.5 "Cascadia Code", Consolas, monospace;
+      pointer-events: none; text-shadow: 0 1px 4px #000;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="hud">loading…</div>
+  <script type="module">
+    import { GraphView } from "/src/graph/graphView.js";
+    const stage = document.getElementById("stage");
+    const hud = document.getElementById("hud");
+    const view = new GraphView(stage, {
+      onNodeClick: (n) => { if (n) hud.textContent = `${n.name} · ${n.category}`; },
+      onStatus: (s) => { if (s.msg) hud.textContent = s.msg; },
+    });
+    view.setActive(true);
+    window.__graphView = view;
+    try {
+      const res = await fetch("/devtools/graph_snapshot.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
+      const snap = await res.json();
+      view.setData(snap);
+      hud.textContent = `${snap.nodes.length} nodes / ${snap.links.length} links`;
+      setTimeout(() => view.zoomToFit(), 400);
+      document.documentElement.setAttribute(
+        "data-graph-demo",
+        `nodes=${snap.nodes.length} links=${snap.links.length}`
+      );
+    } catch (e) {
+      hud.textContent = `加载失败：${e.message}`;
+      document.documentElement.setAttribute("data-graph-demo", `ERR ${e.message}`);
+    }
+  </script>
+</body>
+</html>

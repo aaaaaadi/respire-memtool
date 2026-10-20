@@ -1,0 +1,41 @@
+# Node
+node_modules/
+dist/
+npm-debug.log*
+yarn-error.log*
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Local/private planning notes
+PLAN.md
+
+# Agent / editor state
+.omo/
+.codegraph/
+.idea/
+.vscode/
+
+# Secrets and local tokens
+extension_token.txt
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and crash dumps
+*.log
+*.pdb
+
+# Local test artifacts
+devtools/updates/
+devtools/graph_snapshot.json
+devtools/*.png
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

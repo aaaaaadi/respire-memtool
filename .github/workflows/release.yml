@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and "${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match package.json version v$version"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run tauri build
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          $stage = "release-assets"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $exe = "src-tauri/target/release/memtools.exe"
+          if (-not (Test-Path $exe)) { throw "Missing $exe" }
+          $assetName = "memtools-$version.exe"
+          Copy-Item $exe (Join-Path $stage $assetName)
+
+          Get-ChildItem "src-tauri/target/release/bundle" -Recurse -File -Include *.msi,*.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "memtools-$version.exe" } |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path $stage $_.Name) -Force }
+
+          $file = Get-Item (Join-Path $stage $assetName)
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+          $releaseUrl = "https://github.com/risense-ai/respire-memtool/releases/download/v$version/$assetName"
+          $manifest = [ordered]@{
+            version   = $version
+            notes     = "See https://github.com/risense-ai/respire-memtool/releases/tag/v$version"
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            url       = $releaseUrl
+            sha256    = $hash
+            size      = $file.Length
+            mandatory = $false
+          }
+          $manifest | ConvertTo-Json | Set-Content (Join-Path $stage "update.json") -Encoding utf8NoBOM
+
+          Get-ChildItem $stage -File | Select-Object Name, Length | Format-Table
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          $tag = "v$version"
+          $assets = (Get-ChildItem "release-assets" -File | ForEach-Object { $_.FullName })
+          gh release create $tag --title "memTools $tag" --generate-notes @assets

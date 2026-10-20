@@ -1,0 +1,122 @@
+# ============================================================
+# memTools 配置（用户可改；也是首次运行时写入用户目录的模板）
+#
+# 查找顺序（第一个存在的文件生效）：
+#   1. 环境变量 MEMTOOLS_CONFIG 指向的文件（绝对路径）
+#   2. 可执行文件同目录的 config.toml（绿色便携）
+#   3. 用户配置目录：
+#        Windows  %APPDATA%\com.memtools.desktop\config.toml
+#        macOS    ~/Library/Application Support/com.memtools.desktop/config.toml
+#        Linux    $XDG_CONFIG_HOME/com.memtools.desktop/config.toml
+#                 （未设置时为 ~/.config/com.memtools.desktop/config.toml）
+#   4. 仅开发构建回退到源码目录的 config.toml
+#   5. 以上都没有时使用编译进程序的内置默认值
+#
+# 红线：不得启停 rsrs 服务、不得使用 --direct、不得 shell 拼接调用
+# ============================================================
+
+# ---- 全局热键 ----
+[hotkey]
+# 唤起/隐藏小窗的全局快捷键（tauri-plugin-global-shortcut 语法）
+register = "Ctrl+Alt+R"
+
+# ---- 窗口行为 ----
+[window]
+width = 480
+height = 560
+always_on_top = true
+decorations = false        # 无边框（前端自绘圆角毛玻璃）
+transparent = true
+remember_position = true   # 记忆上次窗口位置
+submit_close = true        # 提交成功后短暂回显并自动关闭
+
+# ---- rsrs 连接（MCP over HTTP，loopback）----
+[rsrs]
+# 基础地址：rsrs runtime 的 loopback HTTP 端口（默认 15169）
+base_url = "http://127.0.0.1:15169"
+# MCP over HTTP 端点：POST {base_url}/{mcp_path}（JSON-RPC 2.0）
+mcp_path = "mcp"
+# 可选鉴权令牌：仅在 rsrs runtime 要求鉴权时填写。
+# 非空时请求会带 Authorization: Bearer <token>；也可用 RSRS_TOKEN /
+# RSRS_AUTH_TOKEN 环境变量覆盖（环境变量优先）。
+auth_token = ""
+# 快速探测超时（status/taxonomy）
+timeout_secs = 5
+# 慢操作超时（remember/recall/update/attach/show/tree）
+# 说明：rsrs 插件 hook（如 mind3D bridge）可能使 recall/remember 耗时 >5s，故放宽
+op_timeout_secs = 30
+
+# memory_* MCP 工具名映射（rsrs runtime 暴露的工具，可随服务端调整）
+[rsrs.tools]
+status = "memory_status"
+taxonomy = "memory_taxonomy"
+remember = "memory_remember"
+recall = "memory_recall"
+tree = "memory_tree"
+show = "memory_show"
+update = "memory_update"
+attach = "memory_attach"
+list = "memory_list"
+query_log_mark = "memory_query_log_mark"
+
+# ---- 自动化（P2 已开放）----
+[automation]
+enabled = false
+# local-fallback | high-quality | llm
+mode = "local-fallback"
+recall_rounds = 2          # 判重轮数
+recall_limit = 3           # 每轮候选上限
+dup_threshold = 0.85       # 相似度 >= 此值视为疑似重复 → 需用户确认（改/并）
+attach_threshold = 0.70    # 相似度 >= 此值视为同题 → 自动挂其下
+
+# ---- 模型判档 / 判树（P2 模型路径）----
+# 任意 OpenAI 兼容 /v1/chat/completions 端点，留空则不用（自动回退本地判档）。
+# mode = "local-fallback" 时完全不调用；mode = "high-quality" 或 "llm" 时启用。
+# 调用失败会自动回退本地判档/判树，并在结果里给出告警（不静默）。
+[automation.llm]
+enabled = false
+endpoint = ""
+model = ""
+api_key = ""              # 留空则不发 Authorization 头
+timeout_secs = 60
+
+# ---- 提醒（P5）----
+# 扫描含【触发】的 task 条目，在「提醒」视图与底栏徽标提示到期/逾期。
+# rsrs CLI 没有后台提醒；这里是 UI 侧定时核对（start + 每 interval_minutes 分钟）。
+[reminder]
+enabled = true
+interval_minutes = 30
+soon_days = 7             # 未来 N 天内视为「即将到期」
+
+# ---- 浏览器扩展端点（P6-②）----
+# 仅绑定 127.0.0.1，供本机 Chrome/Edge 扩展提交网页选中文字。
+# token 留空 = 首次启动自动生成，写入 {app_config_dir}/extension_token.txt；
+# 也可在此填固定值（不建议提交到公开仓库）。
+[extension]
+enabled = true
+port = 17650
+token = ""
+
+# ---- 自动更新（P7）----
+# 客户端 GET endpoint 取 update.json，比版本 → 下载 exe → SHA-256 校验 →
+# 由新 exe 以 --apply-update 等待旧进程退出后自替换并重启（仅 Windows）。
+# 默认指向公开 GitHub Releases 的最新清单；自建分发可改为任意 HTTPS 地址。
+[update]
+enabled = true
+endpoint = "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+check_on_start = true
+
+# ---- 全局划词悬浮（P8，仅 Windows）----
+# 安装 WH_MOUSE_LL 低级鼠标钩子：拖选 / 双击选词后模拟 Ctrl+C 取词，
+# 在光标右下弹出小图标；点图标询问「存为日记 / 在 memTools 中编辑」。
+# 托盘右键「划词悬浮」可随时开关（此处只决定启动时的初始状态）。
+# 非 Windows 平台会禁用该功能（托盘项置灰），其余功能不受影响。
+# 取词会短暂占用剪贴板，完成后还原原来的文本剪贴板。
+[selection]
+enabled = true
+min_chars = 2             # 少于该字数不弹图标（避免误触）
+max_chars = 4000          # 超过则忽略（超长内容请到 memTools 分段记录）
+drag_threshold_px = 8     # 拖选判定：按下到抬起的位移阈值（物理像素）
+capture_timeout_ms = 600  # 模拟 Ctrl+C 后等待剪贴板更新的上限
+double_click = true       # 双击选词也弹图标
+offset_px = 14            # 图标相对光标的偏移

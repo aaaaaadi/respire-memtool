@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>memTools · 划词保存</title>
+  <link rel="stylesheet" href="./src/selection.css" />
+</head>
+<body class="collapsed">
+  <button id="orb" class="orb" type="button" title="保存选中文字到记忆" aria-label="保存选中文字到记忆">
+    <span class="orb-face" aria-hidden="true">
+      <span class="orb-glyph">记</span>
+    </span>
+  </button>
+
+  <section id="panel" class="panel" role="dialog" aria-label="保存选中文字" aria-hidden="true">
+    <div class="preview">
+      <p id="preview-text" class="preview-text empty">未获取到选中文字</p>
+      <div class="meta">
+        <span id="preview-source" class="source"></span>
+        <span id="char-count" class="count">0 字</span>
+      </div>
+    </div>
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+
+    <div class="actions">
+      <button id="btn-journal" class="btn primary" type="button" title="存为日记" disabled>存为日记</button>
+      <button id="btn-edit" class="btn" type="button" title="在 memTools 中编辑" disabled>编辑</button>
+      <button id="btn-close" class="btn icon" type="button" title="关闭" aria-label="关闭">×</button>
+    </div>
+  </section>
+
+  <script type="module" src="./src/selection.js"></script>
+</body>
+</html>
