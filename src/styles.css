@@ -1404,3 +1404,66 @@ html, body {
 .remind-item:hover .remind-actions,
 .remind-item.expanded .remind-actions { opacity: 1; }
 .remind-item.expanded .mem-content { display: block; }
+
+/* 统一按钮的选中对比度；使用桌面原生外层圆角，避免 CSS 边框再叠一圈。 */
+:root {
+  --selection-bg: #343043;
+  --selection-ink: #e5dcef;
+  --action-bg: #726083;
+  --action-ink: #ffffff;
+  --button-bg: #222630;
+  --button-hover: #2a303c;
+  --text-faint: #939eaf;
+}
+.shell { border: 0; border-radius: 0; box-shadow: none; background: var(--bg-base); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.shell::before { display: none; }
+.logo-dot { box-shadow: none; }
+.mini-btn, .seg-btn, .tree-chip, .type-pill, .cat-chip, .choice-btn { background: var(--button-bg); }
+.mini-btn:hover, .seg-btn:hover, .tree-chip:hover, .cat-chip:hover, .choice-btn:hover, .tb-btn:hover { background: var(--button-hover); }
+.mode-btn.active, .seg-btn.active, .tree-chip.active, .view-tab.active, .cat-chip.active, .type-pill.active,
+.view-switch .mini-btn.active, .graph-actions .mini-btn.active {
+  color: var(--selection-ink); background: var(--selection-bg); border-color: var(--border-strong); box-shadow: none;
+}
+.seg-btn.active em { color: var(--text-dim); }
+.mini-btn.primary, .update-btn.has-update { color: var(--action-ink); background: var(--action-bg); border-color: var(--action-bg); box-shadow: none; }
+.mini-btn.primary:hover { filter: brightness(.94); }
+button:focus-visible, .mem-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.browse-toolbar { flex-wrap: wrap; flex: 0 0 auto; }
+.browse-count select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-input); color: var(--text); font: inherit; }
+.memory-query { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--bg-input); font: inherit; font-size: 12px; user-select: text; }
+.view-switch { display: inline-flex; gap: 3px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
+.view-switch .mini-btn { border-color: transparent; white-space: nowrap; }
+.memory-status { flex: 0 0 auto; text-align: left; white-space: normal; overflow-wrap: anywhere; margin-bottom: 8px; line-height: 1.5; min-height: 16px; }
+.browse-cats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; max-height: 116px; scrollbar-gutter: stable; padding-right: 2px; }
+.cat-chip { display: flex; align-items: center; justify-content: space-between; gap: 3px; padding: 4px 6px; min-width: 0; border-radius: 6px; line-height: 1.2; font-weight: 500; }
+.cat-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-chip small { font: 9px var(--mono); color: var(--text-dim); }
+.cat-chip.empty-category { color: var(--text-faint); }
+.cat-chip.active { color: var(--selection-ink); }
+.browse-list { min-height: 0; }
+.memory-tree { list-style: none; padding: 0; margin: 0; }
+.memory-tree-node + .memory-tree-node { margin-top: 5px; }
+.memory-tree-node > .memory-tree { margin-top: 5px; }
+.memory-tree-line { display: flex; gap: 4px; align-items: flex-start; padding-left: calc(min(var(--tree-depth), 8) * 10px); }
+.memory-tree-line > .mem-item { flex: 1; min-width: 0; }
+.tree-fold { flex: 0 0 18px; width: 18px; height: 28px; border: 0; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 15px; }
+.tree-fold:disabled { cursor: default; color: var(--text-faint); }
+.mem-item.path-context { border-style: dashed; background: transparent; }
+.mem-item.path-context .mem-meta { display: none; }
+.mem-item.path-context .mem-title { color: var(--text-dim); font-weight: 500; font-size: 11.5px; }
+@media (max-width: 420px) { .browse-cats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-base: #f5f6f8; --bg-input: #f0f2f5; --bg-glass-strong: #fbfcfd;
+    --text: #293140; --text-dim: #566174; --text-faint: #697386;
+    --selection-bg: #e8e4ef; --selection-ink: #443651;
+    --action-bg: #625376; --button-bg: #fafbfc; --button-hover: #e9edf2;
+    --border: #dce1e8; --border-strong: #bdc6d3;
+  }
+  .choice-btn.primary { color: #256244; background: #e1eee6; }
+  .result-area.ok { color: #256244; }
+  .result-area.err { color: #92364c; }
+  .result-area.warn { color: #775719; }
+  .mem-content { background: #e9edf2; }
+  .mem-item:hover { background: #eef1f5; }
+}

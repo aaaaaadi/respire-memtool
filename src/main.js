@@ -3,6 +3,8 @@
    依赖 Tauri 2 注入的全局 API：window.__TAURI__
    ============================================================ */
 
+import { selectMemories, memoryForest } from "./memory-browser.js";
+
 import { GraphView } from "./graph/graphView.js";
 
 const invoke = () => window.__TAURI__?.core?.invoke;
@@ -48,6 +50,10 @@ const graphContainerSwitch = $("#graph-container-switch");
 const graphIdleDim = $("#graph-idle-dim");
 const graphLevels = $("#graph-levels-input");
 const graphMaxNodes = $("#graph-max-nodes");
+const browseQuery = $("#browse-query");
+const browseViewMode = $("#browse-view-mode");
+const searchViewMode = $("#search-view-mode");
+const searchKind = $("#search-kind");
 const browseCount = $("#browse-count");
 const browseRefresh = $("#browse-refresh");
 const browseStatus = $("#browse-status");
@@ -101,6 +107,17 @@ let browseLoaded = false;
 let browseDirty = true;       // 写入成功后标记，下次进入浏览时重取
 let browseLoading = false;
 let browseReq = 0;            // 请求序号：切分类过快时丢弃过期响应
+let memoryCatalog = null;
+let catalogRequest = null;
+let catalogRevision = 0;
+let browseMode = "tree";
+let searchMode = "tree";
+let searchKindValue = "quick";
+let searchResult = null;
+const browseCollapsed = new Set();
+const searchCollapsed = new Set();
+let searchTimer;
+let browseTimer;
 let searchReq = 0;            // 搜索请求序号
 let remindReq = 0;
 let appConfig = {
@@ -544,25 +561,55 @@ async function rebuildGraphLayout() {
   }
 }
 
-// ---- 最近记忆：分类筛选 + 条数 ----
+// ---- 完整快照与即时筛选：切分类、关键字和展示方式不反复请求 Runtime ----
+async function ensureMemoryCatalog(force = false) {
+  if (force) { browseDirty = true; catalogRevision++; }
+  if (catalogRequest) return catalogRequest;
+  if (memoryCatalog && !browseDirty) return memoryCatalog;
+  catalogRequest = (async () => {
+    while (true) {
+      const revision = catalogRevision;
+      const response = await invoke()("list_recent", { limit: 0, category: null });
+      if (response?.truncated) throw new Error("记忆尚未完整读取，请刷新重试。");
+      // 读取期间写入或刷新时，旧响应不能清除新的失效标记。
+      if (revision !== catalogRevision) continue;
+      memoryCatalog = response?.items || [];
+      browseDirty = false;
+      renderBrowseCats();
+      return memoryCatalog;
+    }
+  })();
+  try { return await catalogRequest; }
+  finally { catalogRequest = null; }
+}
+
 function renderBrowseCats() {
   browseCats.innerHTML = "";
-  const mk = (label, value) => {
-    const b = document.createElement("button");
-    b.className = "cat-chip" + (value === browseCategory ? " active" : "");
-    b.textContent = label;
-    b.dataset.cat = value ?? "";
-    b.addEventListener("click", () => {
+  const make = (label, value) => {
+    const button = document.createElement("button");
+    button.className = "cat-chip" + (value === browseCategory ? " active" : "");
+    button.dataset.cat = value || "";
+    button.setAttribute("aria-pressed", String(value === browseCategory));
+    const caption = document.createElement("span"); caption.textContent = label;
+    button.appendChild(caption);
+    if (memoryCatalog) {
+      const count = value ? selectMemories(memoryCatalog, { category: value }).length : memoryCatalog.length;
+      const badge = document.createElement("small"); badge.textContent = String(count); button.appendChild(badge);
+      if (!count) { button.classList.add("empty-category"); button.title = "当前分类暂无记忆"; }
+    }
+    button.addEventListener("click", () => {
       browseCategory = value;
-      browseCats.querySelectorAll(".cat-chip").forEach((c) =>
-        c.classList.toggle("active", (c.dataset.cat || null) === browseCategory)
-      );
+      browseCats.querySelectorAll(".cat-chip").forEach(chip => {
+        const selected = (chip.dataset.cat || null) === browseCategory;
+        chip.classList.toggle("active", selected); chip.setAttribute("aria-pressed", String(selected));
+      });
+      browseCollapsed.clear();
       loadRecent();
     });
-    return b;
+    return button;
   };
-  browseCats.appendChild(mk("全部", null));
-  for (const item of taxonomy) browseCats.appendChild(mk(item.name, item.name));
+  browseCats.appendChild(make("全部", null));
+  for (const item of taxonomy) browseCats.appendChild(make(item.name, item.name));
 }
 
 function fmtTime(iso) {
@@ -573,52 +620,76 @@ function fmtTime(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-async function loadRecent() {
-  const req = ++browseReq;
+async function loadRecent(force = false) {
+  const request = ++browseReq;
   browseLoading = true;
-  browseStatus.className = "browse-status";
-  browseStatus.textContent = "读取中…";
-  const limit = Math.max(1, Math.min(200, parseInt(browseCount.value, 10) || 20));
-  browseCount.value = limit;
+  browseStatus.className = "browse-status memory-status";
+  browseStatus.textContent = memoryCatalog && !force && !browseDirty ? "筛选中…" : "正在读取全部有效记忆…";
   try {
-    const res = await invoke()("list_recent", { limit, category: browseCategory });
-    if (req !== browseReq) return; // 已被更新的请求取代
-    renderRecent(res);
+    await ensureMemoryCatalog(force === true);
+    if (request !== browseReq) return;
+    renderRecent();
     browseLoaded = true;
-    browseDirty = false;
-  } catch (e) {
-    if (req !== browseReq) return;
-    browseList.innerHTML = "";
-    browseStatus.className = "browse-status err";
-    browseStatus.textContent = `读取失败：${e?.message || e}`;
-  } finally {
-    if (req === browseReq) browseLoading = false;
-  }
+  } catch (error) {
+    if (request !== browseReq) return;
+    browseStatus.className = "browse-status memory-status err";
+    browseStatus.textContent = "读取失败：" + String(error?.message || error);
+  } finally { if (request === browseReq) browseLoading = false; }
 }
 
-function renderRecent(res) {
-  const items = res?.items || [];
-  browseList.innerHTML = "";
-  const scanned = res?.scanned ?? items.length;
-  browseStatus.textContent = res?.category
-    ? `「${res.category}」${items.length} 条 / 扫描最近 ${scanned} 条${res?.truncated ? "（已达上限，可能不全）" : ""}`
-    : `全部类别最近 ${items.length} 条`;
+function renderRecent() {
+  const query = browseQuery.value.trim();
+  const candidates = selectMemories(memoryCatalog || [], { category: browseCategory, query });
+  const limit = Number(browseCount.value) || 0;
+  const matches = limit > 0 ? candidates.slice(0, limit) : candidates;
+  browseStatus.className = "browse-status memory-status";
+  browseStatus.textContent = (browseCategory ? "「" + browseCategory + "」 · " : "") + (query ? "匹配 " : "显示 ") + matches.length + " 条 / 当前范围 " + candidates.length + " 条 · 全库 " + (memoryCatalog?.length || 0) + " 条";
+  renderMemoryCollection(browseList, matches, browseMode, browseCollapsed, Boolean(query), browseCategory ? "当前分类暂无匹配记忆。" : "没有匹配的记忆。");
+}
 
-  if (!items.length) {
-    const empty = document.createElement("div");
-    empty.className = "browse-empty";
-    empty.textContent = res?.category
-      ? `「${res.category}」最近 ${scanned} 条里没有匹配条目。`
-      : "还没有记忆。";
-    browseList.appendChild(empty);
+// 列表与树形共用同一匹配集合；树中补足的祖先只作为路径展示。
+function renderMemoryCollection(container, matches, mode, collapsed, searching, emptyMessage) {
+  container.innerHTML = "";
+  if (!matches.length) {
+    const empty = document.createElement("div"); empty.className = "browse-empty"; empty.textContent = emptyMessage;
+    container.appendChild(empty); return;
+  }
+  if (mode === "list") {
+    for (const entry of matches) container.appendChild(buildMemItem(entry));
     return;
   }
-
-  const frag = document.createDocumentFragment();
-  for (const it of items) {
-    frag.appendChild(buildMemItem(it));
-  }
-  browseList.appendChild(frag);
+  const roots = memoryForest(memoryCatalog || [], matches);
+  const renderNodes = (nodes, depth) => {
+    const list = document.createElement("ul"); list.className = "memory-tree";
+    for (const node of nodes) {
+      const item = document.createElement("li"); item.className = "memory-tree-node";
+      const line = document.createElement("div"); line.className = "memory-tree-line"; line.style.setProperty("--tree-depth", depth);
+      const card = buildMemItem(node.entry);
+      if (!node.matched) { card.classList.add("path-context"); card.title = "上级路径，不计入匹配数量"; }
+      let children;
+      const fold = document.createElement("button"); fold.className = "tree-fold"; fold.type = "button";
+      if (node.children.length) {
+        children = renderNodes(node.children, depth + 1);
+        const open = !collapsed.has(node.entry.id) && (searching || depth === 0);
+        const update = expanded => {
+          children.hidden = !expanded; fold.textContent = expanded ? "▾" : "▸";
+          fold.setAttribute("aria-expanded", String(expanded));
+          fold.setAttribute("aria-label", (expanded ? "收起" : "展开") + "：" + (node.entry.title || node.entry.id));
+        };
+        update(open);
+        fold.addEventListener("click", () => {
+          const expanded = children.hidden;
+          if (expanded) collapsed.delete(node.entry.id); else collapsed.add(node.entry.id);
+          update(expanded);
+        });
+      } else { fold.textContent = "·"; fold.disabled = true; fold.setAttribute("aria-hidden", "true"); }
+      line.append(fold, card); item.appendChild(line);
+      if (children) item.appendChild(children);
+      list.appendChild(item);
+    }
+    return list;
+  };
+  container.appendChild(renderNodes(roots, 0));
 }
 
 /// 统一的记忆卡片：标题 + 元信息 + 可展开正文（最近/搜索共用）
@@ -652,7 +723,14 @@ function buildMemItem(it) {
   content.className = "mem-content";
   content.textContent = it.content || "";
 
-  row.addEventListener("click", () => row.classList.toggle("expanded"));
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-expanded", "false");
+  const toggle = () => row.setAttribute("aria-expanded", String(row.classList.toggle("expanded")));
+  row.addEventListener("click", toggle);
+  row.addEventListener("keydown", event => {
+    if ((event.key === "Enter" || event.key === " ") && event.target === row) { event.preventDefault(); toggle(); }
+  });
   row.appendChild(head);
   row.appendChild(meta);
   row.appendChild(content);
@@ -672,55 +750,52 @@ function buildMemItem(it) {
   return row;
 }
 
-// ---- 搜索：内容语义（recall）/ id 精确 ----
+// ---- 全库即时关键词搜索 / 保留语义搜索，结果可切换列表与祖先树 ----
 async function runSearch() {
   const query = searchInput.value.trim();
-  if (!query) {
-    searchStatus.className = "browse-status";
-    searchStatus.textContent = "请输入要搜索的内容，或粘贴 8 位 id。";
-    return;
-  }
-  const limit = Math.max(1, Math.min(100, parseInt(searchCount.value, 10) || 20));
-  searchCount.value = limit;
-  const req = ++searchReq;
-  searchStatus.className = "browse-status";
-  searchStatus.title = "";
-  searchStatus.textContent = "搜索中…";
+  const request = ++searchReq;
+  const kind = searchKindValue;
+  searchStatus.className = "browse-status memory-status";
+  if (!query) { searchResult = null; searchList.innerHTML = ""; searchStatus.textContent = "输入关键词，搜索全部有效记忆。"; return; }
+  searchStatus.textContent = searchKindValue === "quick" ? "筛选中…" : "语义搜索中…";
   try {
-    const res = await invoke()("search_memory", { query, limit });
-    if (req !== searchReq) return;
-    renderSearch(res);
-  } catch (e) {
-    if (req !== searchReq) return;
+    let response;
+    if (kind === "quick") {
+      await ensureMemoryCatalog();
+      if (request !== searchReq) return;
+      response = { mode: "quick", query, items: selectMemories(memoryCatalog, { query }) };
+    } else {
+      const limit = Math.max(1, Math.min(100, Number(searchCount.value) || 20));
+      response = await invoke()("search_memory", { query, limit });
+    }
+    if (request !== searchReq) return;
+    searchResult = response;
+    searchCollapsed.clear();
+    renderSearch(response);
+    // 语义 / id 查询独立可用；全量快照只补祖先路径，失败时保留命中项。
+    if (kind !== "quick" && (!memoryCatalog || browseDirty)) {
+      ensureMemoryCatalog().then(() => {
+        if (request === searchReq) renderSearch(response);
+      }).catch(() => {
+        if (request !== searchReq) return;
+        response.pathIncomplete = true;
+        renderSearch(response);
+      });
+    }
+  } catch (error) {
+    if (request !== searchReq) return;
     searchList.innerHTML = "";
-    searchStatus.className = "browse-status err";
-    searchStatus.textContent = `搜索失败：${e?.message || e}`;
+    searchStatus.className = "browse-status memory-status err";
+    searchStatus.textContent = "搜索失败：" + String(error?.message || error);
   }
 }
 
-function renderSearch(res) {
-  const items = res?.items || [];
-  searchList.innerHTML = "";
-  searchStatus.className = "browse-status";
-  searchStatus.title = res?.message || "";
-  if (res?.message) {
-    searchStatus.textContent = res.message;
-  } else if (res?.mode === "recall") {
-    searchStatus.textContent = `语义匹配 ${items.length} 条`;
-  } else {
-    searchStatus.textContent = items.length ? "id 精确命中" : "未找到";
-  }
-
-  if (!items.length) {
-    const empty = document.createElement("div");
-    empty.className = "browse-empty";
-    empty.textContent = "没有匹配的记忆。";
-    searchList.appendChild(empty);
-    return;
-  }
-  const frag = document.createDocumentFragment();
-  for (const it of items) frag.appendChild(buildMemItem(it));
-  searchList.appendChild(frag);
+function renderSearch(response) {
+  const items = response?.items || [];
+  searchStatus.className = "browse-status memory-status";
+  searchStatus.title = response?.message || "";
+  searchStatus.textContent = (response?.mode === "quick" ? "全库关键词匹配 " : response?.mode === "recall" ? "语义匹配 " : "精确匹配 ") + items.length + " 条" + (searchMode === "tree" && items.length ? response.pathIncomplete ? " · 上级路径未能读取" : memoryCatalog ? " · 保留上级路径" : " · 正在补全上级路径" : "");
+  renderMemoryCollection(searchList, items, searchMode, searchCollapsed, true, "没有匹配的记忆。");
 }
 
 // ---- 提醒：含【触发】日期的 task 到期核对 ----
@@ -990,6 +1065,7 @@ function resetInputs() {
   updateCharCount();
   updateTriggerRow(false);
   browseDirty = true;
+  catalogRevision++;
 }
 
 // ---- 自动化结果处理 ----
@@ -1374,7 +1450,31 @@ async function init() {
   viewTabs.querySelectorAll(".view-tab").forEach((b) =>
     b.addEventListener("click", () => switchView(b.dataset.view))
   );
-  browseRefresh.addEventListener("click", loadRecent);
+  browseRefresh.addEventListener("click", () => loadRecent(true));
+  browseQuery.addEventListener("input", () => {
+    clearTimeout(browseTimer);
+    browseTimer = setTimeout(() => { browseCollapsed.clear(); loadRecent(); }, 120);
+  });
+  const bindViewMode = (element, change) => element.querySelectorAll("[data-mode]").forEach(button => {
+    button.addEventListener("click", () => {
+      element.querySelectorAll("[data-mode]").forEach(item => { const active = item === button; item.classList.toggle("active", active); item.setAttribute("aria-pressed", String(active)); });
+      change(button.dataset.mode);
+    });
+  });
+  bindViewMode(browseViewMode, mode => { browseMode = mode; renderRecent(); });
+  bindViewMode(searchViewMode, mode => { searchMode = mode; if (searchResult) renderSearch(searchResult); });
+  searchKind.querySelectorAll("[data-kind]").forEach(button => button.addEventListener("click", () => {
+    searchKindValue = button.dataset.kind;
+    searchReq++; clearTimeout(searchTimer);
+    searchKind.querySelectorAll("[data-kind]").forEach(item => { const active = item === button; item.classList.toggle("active", active); item.setAttribute("aria-pressed", String(active)); });
+    $("#search-count-wrap").classList.toggle("hidden", searchKindValue === "quick");
+    searchInput.placeholder = searchKindValue === "quick" ? "快速搜索全部记忆的标题、正文或 id" : "描述要查找的内容，或粘贴 id";
+    runSearch();
+  }));
+  searchInput.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    if (searchKindValue === "quick") searchTimer = setTimeout(runSearch, 120);
+  });
   remindRefresh.addEventListener("click", loadReminders);
   browseCount.addEventListener("change", () => {
     if (currentView === "browse") loadRecent();

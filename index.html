@@ -100,34 +100,37 @@
       <section id="result-area" class="result-area hidden"></section>
     </main>
 
-    <!-- 最近记忆浏览 -->
+    <!-- 全部有效记忆：列表 / 真实父子树 / 即时筛选 -->
     <main class="content hidden" id="view-browse">
-      <div class="browse-toolbar">
-        <label class="browse-count" title="显示条数（1-200，默认 20）">
-          <span>数量</span>
-          <input id="browse-count" type="number" min="1" max="200" step="1" value="20" />
-        </label>
-        <button id="browse-refresh" class="mini-btn">刷新</button>
-        <span id="browse-status" class="browse-status"></span>
+      <div class="search-toolbar">
+        <input id="browse-query" class="memory-query" type="search" placeholder="快速筛选标题、正文或 id" aria-label="快速筛选记忆" />
       </div>
-
+      <div class="browse-toolbar">
+        <label class="browse-count"><span>范围</span>
+          <select id="browse-count" aria-label="浏览范围"><option value="0">全部</option><option value="20">最近 20 条</option><option value="50">最近 50 条</option><option value="100">最近 100 条</option><option value="200">最近 200 条</option></select>
+        </label>
+        <div class="view-switch" id="browse-view-mode" role="group" aria-label="记忆展示方式">
+          <button class="mini-btn active" data-mode="tree" aria-pressed="true">树形</button><button class="mini-btn" data-mode="list" aria-pressed="false">列表</button>
+        </div>
+        <button id="browse-refresh" class="mini-btn">刷新</button>
+      </div>
       <div class="browse-cats" id="browse-cats"></div>
+      <div id="browse-status" class="browse-status memory-status" role="status"></div>
       <div class="browse-list" id="browse-list"></div>
     </main>
 
-    <!-- 记忆搜索：内容语义匹配 / id 精确命中 -->
+    <!-- 关键词即时搜索，保留原语义 / id 搜索入口 -->
     <main class="content hidden" id="view-search">
       <div class="search-toolbar">
-        <input id="search-input" type="text" placeholder="内容语义搜索，或粘贴 id（如 bd22ad3a）" spellcheck="false" />
+        <input id="search-input" type="search" placeholder="快速搜索全部记忆的标题、正文或 id" aria-label="搜索全部记忆" spellcheck="false" />
         <button id="search-btn" class="mini-btn primary">搜索</button>
       </div>
-      <div class="browse-toolbar">
-        <label class="browse-count" title="语义搜索返回条数（1-100，默认 20）">
-          <span>数量</span>
-          <input id="search-count" type="number" min="1" max="100" step="1" value="20" />
-        </label>
-        <span id="search-status" class="browse-status"></span>
+      <div class="browse-toolbar search-options">
+        <div class="view-switch" id="search-kind" role="group" aria-label="搜索方式"><button class="mini-btn active" data-kind="quick" aria-pressed="true">关键词</button><button class="mini-btn" data-kind="semantic" aria-pressed="false">语义</button></div>
+        <div class="view-switch" id="search-view-mode" role="group" aria-label="搜索结果展示方式"><button class="mini-btn active" data-mode="tree" aria-pressed="true">树形</button><button class="mini-btn" data-mode="list" aria-pressed="false">列表</button></div>
+        <label class="browse-count hidden" id="search-count-wrap" title="语义搜索返回数量"><span>数量</span><input id="search-count" type="number" min="1" max="100" value="20" /></label>
       </div>
+      <div id="search-status" class="browse-status memory-status" role="status">输入关键词，即时搜索全部有效记忆。</div>
       <div class="browse-list" id="search-list"></div>
     </main>
 

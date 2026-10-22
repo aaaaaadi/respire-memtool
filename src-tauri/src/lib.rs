@@ -789,87 +789,45 @@ impl From<rsrs_client::ListedEntry> for RecentItemOut {
 #[derive(Serialize)]
 struct RecentOut {
     items: Vec<RecentItemOut>,
-    /// 实际扫描的最近条数（分类过滤时是采样窗口大小）
+    /// 完整快照中的有效记忆数（含日记）
     scanned: u32,
-    /// 采样窗口已到上限仍不足请求条数（结果可能不全）
+    /// 兼容字段：完整读取成功时固定 false；不完整读取会明确报错
     truncated: bool,
     /// 实际生效的分类（None = 全部）
     category: Option<String>,
 }
 
-/// 最近记忆：limit 默认 20（1..=200）；category 为 23 分类名/id，缺省=全部类别。
-///
-/// memory_list 不支持按分类过滤，故分类模式下：
-/// ① 用 memory_tree 收集该分类整棵子树 id；② 按窗口拉最近条目过滤；
-/// ③ 不足则逐步扩大窗口（最大 2000），并回传 truncated 供 UI 提示。
+/// 最近记忆：limit=0 为全部有效记忆；分类按已读取的真实父链筛选，空分类返回空状态。
 #[tauri::command]
-fn list_recent(
+async fn list_recent(
     state: tauri::State<'_, AppState>,
     limit: Option<u32>,
     category: Option<String>,
 ) -> Result<RecentOut, String> {
-    let limit = limit.unwrap_or(20).clamp(1, 200);
-    let cat = category
-        .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty() && c != "全部" && c != "all");
-
-    let Some(cat) = cat else {
-        let items = state
-            .client
-            .list_recent(limit)
-            .map_err(|e| format_rsrs_err(&e))?;
-        return Ok(RecentOut {
+    let client = state.client.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 1. 只读取得完整账号快照，网络等待不占用桌面界面线程。
+        let entries = client.list_all().map_err(|e| format_rsrs_err(&e))?;
+        let scanned = entries.len() as u32;
+        let category = category
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty() && name != "全部" && name != "all");
+        let requested = limit.unwrap_or(20);
+        // 2. 先按真实祖先筛选，再限制最近数量；0 不截断，扫描完整时不存在采样截断。
+        let items = recent::filter_category(
+            entries,
+            category.as_deref(),
+            (requested != 0).then_some(requested as usize),
+        );
+        Ok(RecentOut {
             items: items.into_iter().map(Into::into).collect(),
-            scanned: limit,
+            scanned,
             truncated: false,
-            category: None,
-        });
-    };
-
-    // 分类名/id → 树根 id
-    let taxonomy = state
-        .client
-        .list_taxonomy()
-        .map_err(|e| format_rsrs_err(&e))?;
-    let node = taxonomy
-        .iter()
-        .find(|t| t.name == cat || t.id == cat)
-        .ok_or_else(|| format!("未找到分类「{cat}」"))?
-        .clone();
-
-    // 该分类整棵子树的 id 集合（含树根）
-    let nodes = state
-        .client
-        .tree_flat(&node.id, 50)
-        .map_err(|e| format_rsrs_err(&e))?;
-    let ids: std::collections::HashSet<String> = nodes.into_iter().map(|n| n.id).collect();
-
-    let mut window = recent::initial_window(limit);
-    loop {
-        let items = state
-            .client
-            .list_recent(window)
-            .map_err(|e| format_rsrs_err(&e))?;
-        let scanned = items.len() as u32;
-        let filtered: Vec<RecentItemOut> = recent::filter_entries(items, &ids, limit as usize)
-            .into_iter()
-            .map(Into::into)
-            .collect();
-        let enough = filtered.len() >= limit as usize;
-        // 返回条数少于窗口 = 已到库尾，无需再扩窗
-        let exhausted = scanned < window;
-        let can_expand = !exhausted && window < 2000;
-        if enough || !can_expand {
-            return Ok(RecentOut {
-                items: filtered,
-                scanned,
-                // 已到库尾仍不足 = 确实没有更多；只有撞到窗口上限才可能不全
-                truncated: !enough && !exhausted,
-                category: Some(node.name.clone()),
-            });
-        }
-        window = (window * 2).min(2000);
-    }
+            category,
+        })
+    })
+    .await
+    .map_err(|e| format!("记忆读取线程失败：{e}"))?
 }
 
 // ---------------------------------------------------------------------------
