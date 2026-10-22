@@ -20,6 +20,7 @@ mod selection;
 mod selection;
 pub mod server;
 pub mod updater;
+pub mod update_http;
 
 use std::sync::Arc;
 

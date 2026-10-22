@@ -194,6 +194,8 @@ debug 构建会在第 3 项之前额外读取源码目录的 `src-tauri/config.t
 
 客户端读取 `update.json` 后比较版本，下载新可执行文件并校验 SHA-256，然后由新进程在旧进程退出后完成替换并重启。安装仅支持 Windows。
 
+更新请求优先使用环境代理，未配置时读取 Windows 当前用户的静态系统代理；回环地址始终直连，并支持代理绕过列表。仅配置 PAC 而没有静态代理时不解析 PAC。MCP 客户端兼容 JSON 与 SSE，并独立于更新代理保持直连。
+
 清单字段：`version`、`notes`、`pub_date`、`url`、`sha256`、`size`、`mandatory`。
 
 发布流程：

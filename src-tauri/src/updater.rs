@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const USER_AGENT: &str = "memTools-updater";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -64,10 +63,7 @@ fn fetch_manifest(endpoint: &str) -> Result<Manifest, String> {
     if endpoint.is_empty() {
         return Err("未配置更新地址（config.toml 的 [update] endpoint）".into());
     }
-    let resp = ureq::get(endpoint)
-        .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(8))
-        .call()
+    let resp = crate::update_http::get(endpoint, Duration::from_secs(8))
         .map_err(|e| format!("检查更新失败：{e}"))?;
     let text = resp
         .into_string()
@@ -104,10 +100,7 @@ fn download(app: &AppHandle, manifest: &Manifest) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
     let dest = dir.join(format!("memtools-{}.exe", manifest.version));
 
-    let resp = ureq::get(&manifest.url)
-        .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(180))
-        .call()
+    let resp = crate::update_http::get(&manifest.url, Duration::from_secs(180))
         .map_err(|e| format!("下载更新失败：{e}"))?;
     let total = manifest.size.max(
         resp.header("Content-Length")

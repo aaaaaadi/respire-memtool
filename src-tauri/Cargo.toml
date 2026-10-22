@@ -35,6 +35,8 @@ sha2 = "0.10"
 arboard = { version = "3", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# 复用锁定依赖读取当前用户的 Windows 静态系统代理。
+winreg = "=0.56.0"
 # 全局划词（P8）：Win32 鼠标钩子 / SendInput / 剪贴板序列号 / 显示器工作区
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

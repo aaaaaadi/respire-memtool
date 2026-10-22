@@ -8,6 +8,7 @@
 //! 红线：不启停 rsrs 服务、不使用 --direct、不 shell 拼接命令。
 
 use std::sync::Mutex;
+use std::io::{BufRead, BufReader, Cursor};
 
 use serde::{Deserialize, Serialize};
 
@@ -348,6 +349,7 @@ impl RsrsClient {
     }
 
     fn with_auth(&self, req: ureq::Request) -> ureq::Request {
+        let req = req.set("Accept", "application/json, text/event-stream");
         if self.token.is_empty() {
             req
         } else {
@@ -361,12 +363,14 @@ impl RsrsClient {
 
     fn agent(&self) -> ureq::Agent {
         ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
             .timeout(self.timeout)
             .build()
     }
 
     fn agent_slow(&self) -> ureq::Agent {
         ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
             .timeout(self.slow_timeout)
             .build()
     }
@@ -390,8 +394,8 @@ impl RsrsClient {
         inner.id += 1;
         match self.with_auth(agent.post(&self.mcp_url())).send_json(&req) {
             Ok(resp) => {
-                let _ = resp.into_string();
-                // 初始化响应不校验内容（serverInfo respire 1.0.12）；失败则直接忽略
+                let _ = Self::parse_http(resp, &req["id"]);
+                // 保持原有兼容行为：握手失败不阻塞后续调用，但 SSE 不再等连接关闭。
             }
             Err(_) => {}
         }
@@ -448,21 +452,9 @@ impl RsrsClient {
         drop(inner);
 
         let resp: serde_json::Value = match self.with_auth(agent.post(&url)).send_json(&req) {
-            Ok(r) => Self::parse_http(r)?,
+            Ok(r) | Err(ureq::Error::Status(_, r)) => Self::parse_http(r, &req["id"])?,
             Err(ureq::Error::Transport(t)) => {
                 return Err(RsrsError::Unreachable(t.to_string()));
-            }
-            Err(ureq::Error::Status(code, r)) => {
-                let body = r.into_string().unwrap_or_default();
-                if code == 401 || code == 403 {
-                    return Err(RsrsError::AuthFailed(format!("HTTP {code}: {body}")));
-                }
-                // 其他 HTTP 状态：尝试按 JSON-RPC error 解析
-                let val = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
-                if let Some(e) = val.get("error") {
-                    return Err(Self::jsonrpc_error(e));
-                }
-                return Err(RsrsError::Mcp(format!("HTTP {code}: {body}")));
             }
         };
 
@@ -533,16 +525,50 @@ impl RsrsClient {
         Ok(env)
     }
 
-    fn parse_http(resp: ureq::Response) -> Result<serde_json::Value, RsrsError> {
+    fn parse_http(
+        resp: ureq::Response,
+        expected_id: &serde_json::Value,
+    ) -> Result<serde_json::Value, RsrsError> {
         let status = resp.status();
-        let text = resp.into_string().unwrap_or_default();
+        // 状态码已足以判定鉴权失败，正文中断不能把它误报为解析错误。
         if status == 401 || status == 403 {
-            return Err(RsrsError::AuthFailed(format!("HTTP {status}: {text}")));
+            return Err(RsrsError::AuthFailed(format!("HTTP {status}")));
         }
+        let is_sse = resp
+            .header("Content-Type")
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .map(str::trim)
+            .map(|s| s.eq_ignore_ascii_case("text/event-stream"))
+            .unwrap_or(false);
+        // 1. SSE 收到本次请求的完整事件即可返回，不等待长连接关闭。
+        if (200..300).contains(&status) && is_sse {
+            return read_sse(BufReader::new(resp.into_reader()), expected_id);
+        }
+        let text = resp
+            .into_string()
+            .map_err(|e| RsrsError::Parse(format!("读取响应失败：{e}")))?;
+        // 2. 无 SSE 标头的兼容端点按正文识别；错误报文仍保留原有 JSON-RPC 分类。
+        let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+        let parsed = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            serde_json::from_str(trimmed).map_err(|e| RsrsError::Parse(e.to_string()))
+        } else {
+            read_sse(Cursor::new(trimmed.as_bytes()), expected_id)
+        };
         if !(200..300).contains(&status) {
-            return Err(RsrsError::Mcp(format!("HTTP {status}: {text}")));
+            if let Ok(value) = &parsed {
+                if let Some(error) = value.get("error") {
+                    return Err(Self::jsonrpc_error(error));
+                }
+            }
+            return Err(RsrsError::Mcp(format!("HTTP {status}")));
         }
-        serde_json::from_str(&text).map_err(|e| RsrsError::Parse(e.to_string()))
+        let value = parsed?;
+        if value.get("id") != Some(expected_id) {
+            return Err(RsrsError::Parse("JSON-RPC 响应 id 与请求不匹配".into()));
+        }
+        Ok(value)
     }
 
     fn jsonrpc_error(e: &serde_json::Value) -> RsrsError {
@@ -897,6 +923,57 @@ impl RsrsClient {
     }
 }
 
+/// 只返回当前请求的 result/error；心跳、通知和其他请求的事件不能冒充本次响应。
+fn read_sse(
+    mut reader: impl BufRead,
+    expected_id: &serde_json::Value,
+) -> Result<serde_json::Value, RsrsError> {
+    let mut line = String::new();
+    let mut data = String::new();
+    let mut first_line = true;
+    let mut total = 0usize;
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| RsrsError::Parse(format!("读取 SSE 失败：{e}")))?;
+        total += n;
+        if total > 32 * 1024 * 1024 {
+            return Err(RsrsError::Parse("SSE 响应超过 32MB".into()));
+        }
+        let mut field = line.trim_end_matches(['\r', '\n']);
+        if first_line {
+            field = field.trim_start_matches('\u{feff}');
+            first_line = false;
+        }
+        // 1. 空行提交一个事件；多行 data 按 SSE 规范用换行连接。
+        if n == 0 || field.is_empty() {
+            if !data.is_empty() {
+                let value: serde_json::Value = serde_json::from_str(&data)
+                    .map_err(|e| RsrsError::Parse(format!("SSE data JSON 无效：{e}")))?;
+                if value.get("id") == Some(expected_id)
+                    && (value.get("result").is_some() || value.get("error").is_some())
+                {
+                    return Ok(value);
+                }
+                data.clear();
+            }
+            if n == 0 {
+                return Err(RsrsError::Parse(
+                    "SSE 中未收到匹配本次请求的 JSON-RPC 响应".into(),
+                ));
+            }
+        } else if field == "data" || field.starts_with("data:") {
+            // 2. 忽略 event/id/retry 和注释，data 字段只去掉冒号后的一个可选空格。
+            let value = field.strip_prefix("data:").unwrap_or("");
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
@@ -985,4 +1062,186 @@ fn looks_like_candidate(s: &str) -> bool {
 /// 可靠标记为 "(continuing)"（见记忆 ae2b3499 实测报文）。
 fn is_nonfatal_warning(s: &str) -> bool {
     s.to_lowercase().contains("continuing")
+}
+
+
+#[cfg(test)]
+mod transport_regressions {
+    use super::*;
+
+    fn response(status: u16, body: &str) -> ureq::Response {
+        ureq::Response::new(status, "test", body).unwrap()
+    }
+
+    #[test]
+    fn accepts_plain_json_response() {
+        let v = RsrsClient::parse_http(
+            response(200, r#"{"jsonrpc":"2.0","id":7,"result":{}}"#),
+            &serde_json::json!(7),
+        )
+        .unwrap();
+        assert_eq!(v["id"], 7);
+    }
+
+    #[test]
+    fn accepts_sse_message() {
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
+        let v = RsrsClient::parse_http(response(200, body), &serde_json::json!(7)).unwrap();
+        assert_eq!(v["result"]["ok"], true);
+    }
+
+    #[test]
+    fn accepts_multiline_sse_and_ignores_heartbeat_and_notification() {
+        let body = "\u{feff}: heartbeat\r\n\r\nevent: message\r\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\r\n\r\nevent: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\r\ndata: \"result\":{\"value\":42}}\r\n\r\n";
+        let v = RsrsClient::parse_http(response(200, body), &serde_json::json!(7)).unwrap();
+        assert_eq!(v["result"]["value"], 42);
+    }
+
+    #[test]
+    fn preserves_sse_jsonrpc_auth_error() {
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32001,\"message\":\"unauthorized\"}}\n\n";
+        let v = RsrsClient::parse_http(response(200, body), &serde_json::json!(7)).unwrap();
+        assert!(matches!(
+            RsrsClient::jsonrpc_error(&v["error"]),
+            RsrsError::AuthFailed(_)
+        ));
+    }
+
+    #[test]
+    fn malformed_stream_is_parse_error() {
+        assert!(matches!(
+            RsrsClient::parse_http(
+                response(200, "event: message\ndata: not-json\n\n"),
+                &serde_json::json!(7)
+            ),
+            Err(RsrsError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn http_unauthorized_remains_auth_error() {
+        assert!(matches!(
+            RsrsClient::parse_http(response(401, "denied"), &serde_json::json!(7)),
+            Err(RsrsError::AuthFailed(_))
+        ));
+    }
+    #[test]
+    fn skips_other_request_ids_in_sse() {
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":8,\"result\":\"other\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":\"requested\"}\n\n";
+        let value = RsrsClient::parse_http(response(200, body), &serde_json::json!(7)).unwrap();
+        assert_eq!(value["result"], "requested");
+    }
+
+    #[test]
+    fn plain_json_with_wrong_id_is_not_accepted() {
+        assert!(matches!(
+            RsrsClient::parse_http(
+                response(200, r#"{"jsonrpc":"2.0","id":8,"result":{}}"#),
+                &serde_json::json!(7)
+            ),
+            Err(RsrsError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn sse_response_does_not_wait_for_connection_close() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nConnection: keep-alive\r\n\r\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n").unwrap();
+            stream.flush().unwrap();
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(3));
+        });
+        let resp = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .get(&format!("http://{address}/mcp"))
+            .call()
+            .unwrap();
+        let result = RsrsClient::parse_http(resp, &serde_json::json!(7));
+        let _ = done.send(());
+        server.join().unwrap();
+        assert_eq!(result.unwrap()["result"]["ok"], true);
+    }
+
+    #[test]
+    fn sse_status_preserves_authentication_and_active_data_directory() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let mut req = server
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert!(req.headers().iter().any(|h| h.field.equiv("Authorization")
+                    && h.value.as_str() == "Bearer test-only-fixture"));
+                assert!(req
+                    .headers()
+                    .iter()
+                    .any(|h| h.field.equiv("Accept")
+                        && h.value.as_str().contains("text/event-stream")));
+                let mut text = String::new();
+                req.as_reader().read_to_string(&mut text).unwrap();
+                let call: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if call["method"] == "notifications/initialized" {
+                    req.respond(tiny_http::Response::empty(202)).unwrap();
+                    continue;
+                }
+                let result = if call["method"] == "initialize" {
+                    serde_json::json!({"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}})
+                } else {
+                    assert_eq!(call["params"]["name"], "memory_status");
+                    serde_json::json!({"content":[{"type":"text","text":r#"{"status":"ok","items":[],"actions":[],"errors":[],"summary":{"data_dir":"C:/fixture/rsrs","retrieval_index":{"state":"ready"},"sync_live":{"pending":0,"conflicts":0}}}"#}]})
+                };
+                let message = serde_json::json!({"jsonrpc":"2.0","id":call["id"],"result":result});
+                req.respond(
+                    tiny_http::Response::from_string(format!(
+                        "event: message\ndata: {message}\n\n"
+                    ))
+                    .with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                    ),
+                )
+                .unwrap();
+            }
+        });
+        let cfg: crate::config::AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        let client = RsrsClient::new(
+            format!("http://{address}"),
+            "mcp".into(),
+            cfg.rsrs.tools,
+            2,
+            2,
+        )
+        .with_token("test-only-fixture");
+        let status = client.status_info().unwrap();
+        assert!(status.online && status.index_ready);
+        assert_eq!(status.data_dir.as_deref(), Some("C:/fixture/rsrs"));
+        assert_eq!(client.data_dir().unwrap(), "C:/fixture/rsrs");
+        worker.join().unwrap();
+    }
+    #[test]
+    fn truncated_unauthorized_body_remains_auth_failure() {
+        let response: ureq::Response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 100\r\n\r\nx"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            RsrsClient::parse_http(response, &serde_json::json!(7)),
+            Err(RsrsError::AuthFailed(_))
+        ));
+    }
+
+
 }
