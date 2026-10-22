@@ -1,11 +1,11 @@
+importScripts("settings.js");
+
 // memTools 记忆捕获 — MV3 后台 Service Worker
 // 右键菜单 → 取选区 → POST 到本机 memTools 端点（127.0.0.1，带令牌）。
 
 const MENU_ROOT = "memtools-save";
 const MENU_JOURNAL = "memtools:journal";
 const MENU_AUTO = "memtools:auto";
-
-const DEFAULTS = { port: 17650, token: "" };
 
 // 每次启动重建菜单，避免升级后残留旧项
 function installMenus() {
@@ -30,7 +30,10 @@ function installMenus() {
   });
 }
 
-chrome.runtime.onInstalled.addListener(installMenus);
+chrome.runtime.onInstalled.addListener(async () => {
+  await getSettings({ refresh: true });
+  installMenus();
+});
 chrome.runtime.onStartup.addListener(installMenus);
 // Service Worker 每次启动都重建一次：避免“先加载扩展、后改代码”导致菜单缺失
 installMenus();
@@ -49,14 +52,6 @@ function notify(title, message) {
     },
     () => void chrome.runtime.lastError,
   );
-}
-
-async function getSettings() {
-  const got = await chrome.storage.local.get(["port", "token"]);
-  return {
-    port: Number(got.port) || DEFAULTS.port,
-    token: typeof got.token === "string" ? got.token.trim() : "",
-  };
 }
 
 // 优先用 scripting 取完整选区；受限页面回退到 info.selectionText
@@ -80,7 +75,7 @@ async function save({ text, mode, url, pageTitle }) {
   if (!token) {
     notify(
       "memTools 未配置令牌",
-      "请打开扩展选项，粘贴 memTools 配置目录下 extension_token.txt 的内容。",
+      "请在 memTools 的浏览器扩展面板点击安装 / 配对，再加载生成的扩展目录。",
     );
     chrome.runtime.openOptionsPage();
     return;
@@ -107,7 +102,7 @@ async function save({ text, mode, url, pageTitle }) {
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 401) {
-      notify("memTools 令牌无效", "请重新复制 extension_token.txt 到扩展选项。");
+      notify("memTools 令牌无效", "请在 memTools 点击安装 / 配对，然后在 Chrome 扩展页重新加载此扩展。");
       return;
     }
     if (!resp.ok || data.ok === false) {

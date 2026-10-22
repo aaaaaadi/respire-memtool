@@ -9,7 +9,7 @@ function setStatus(text, kind) {
 }
 
 async function load() {
-  const got = await chrome.storage.local.get(["port", "token"]);
+  const got = await getSettings();
   if (got.port) $("#port").value = String(got.port);
   if (typeof got.token === "string") $("#token").value = got.token;
 }

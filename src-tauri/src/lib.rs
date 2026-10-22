@@ -19,6 +19,7 @@ mod selection;
 #[path = "selection_unsupported.rs"]
 mod selection;
 pub mod server;
+pub mod extension_setup;
 pub mod updater;
 
 use std::sync::Arc;
@@ -300,6 +301,7 @@ fn extension_info(app: AppHandle, state: tauri::State<'_, AppState>) -> Extensio
         .app_config_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("extension_token.txt");
+    let endpoint = app.try_state::<server::Started>();
     let configured = state.config.extension.token.trim();
     let token = if !configured.is_empty() {
         configured.to_string()
@@ -309,11 +311,40 @@ fn extension_info(app: AppHandle, state: tauri::State<'_, AppState>) -> Extensio
             .unwrap_or_default()
     };
     ExtensionInfo {
-        enabled: state.config.extension.enabled,
-        port: state.config.extension.port,
-        token,
+        enabled: endpoint.is_some(),
+        port: endpoint.as_ref().map(|s| s.port).unwrap_or(state.config.extension.port),
+        token: endpoint.as_ref().map(|s| s.token.clone()).unwrap_or(token),
         token_path: token_path.display().to_string(),
     }
+}
+
+#[derive(Serialize)]
+struct ExtensionInstallOut {
+    /// 私有扩展目录：来自本机用户配置目录，完整显示以便 Chrome 选择，不包含令牌值。
+    directory: String,
+    /// 安装指引：来自打开安装页的结果；失败保留可操作说明，不返回空提示。
+    message: String,
+}
+
+/// 用户点击后导出私有扩展并打开安装页；不执行静默安装。
+#[tauri::command]
+fn extension_install(app: AppHandle) -> Result<ExtensionInstallOut, String> {
+    // 1. 必须使用本次已成功监听的端点和令牌，避免端口占用时导出错误配置。
+    let endpoint = app
+        .try_state::<server::Started>()
+        .ok_or("扩展端点未启动：请检查配置中的 extension.enabled 和端口占用。")?;
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("chrome-extension");
+    let directory = extension_setup::prepare(&dir, endpoint.port, &endpoint.token)?;
+    // 2. 浏览器打开失败仍返回准备好的目录，用户可手动完成 Chrome 的加载确认。
+    let result = extension_setup::open_install_ui(&directory);
+    Ok(ExtensionInstallOut {
+        directory: directory.display().to_string(),
+        message: result.err().unwrap_or_else(|| "开启开发者模式，点击加载已解压的扩展并选择此目录；已有扩展请点重新加载。配对会自动完成。".into()),
+    })
 }
 
 /// runtime 连通性 + 离线/同步状态（只读探测，不启停服务）
@@ -1577,11 +1608,14 @@ pub fn run() {
                     token_path.clone(),
                     automation_backup_dir(app.handle()),
                 ) {
-                    Ok(s) => eprintln!(
-                        "[memTools] 浏览器扩展端点已启动 http://127.0.0.1:{}（令牌文件：{}）",
-                        s.port,
-                        token_path.display()
-                    ),
+                    Ok(s) => {
+                        eprintln!(
+                            "[memTools] 浏览器扩展端点已启动 http://127.0.0.1:{}（令牌文件：{}）",
+                            s.port,
+                            token_path.display()
+                        );
+                        app.manage(s);
+                    }
                     Err(e) => eprintln!("[memTools] {e}"),
                 }
             }
@@ -1597,6 +1631,7 @@ pub fn run() {
             submit_memory,
             get_app_config,
             extension_info,
+            extension_install,
             runtime_status,
             hide_window,
             quit_app,

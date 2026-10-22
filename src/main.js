@@ -1203,6 +1203,19 @@ function initExtensionPanel() {
 
   extClose?.addEventListener("click", close);
 
+  const install = document.getElementById("ext-install");
+  install?.addEventListener("click", async () => {
+    install.disabled = true;
+    try {
+      const result = await invoke()("extension_install");
+      document.getElementById("ext-install-hint").textContent = result.message + " 目录：" + result.directory + "。此目录含本机配对信息，请勿分享。";
+    } catch (err) {
+      document.getElementById("ext-install-hint").textContent = String(err?.message || err);
+    } finally {
+      install.disabled = false;
+    }
+  });
+
   extCopy?.addEventListener("click", async () => {
     const text = extToken.value.trim();
     if (!text) {

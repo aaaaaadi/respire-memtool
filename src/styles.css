@@ -989,8 +989,9 @@ html, body {
   outline: none;
   border-color: rgba(124, 92, 255, 0.55);
 }
-.ext-actions { display: flex; gap: 8px; }
+.ext-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .ext-hint {
+  overflow-wrap: anywhere;
   margin-top: 8px;
   font-size: 10px;
   line-height: 1.55;
