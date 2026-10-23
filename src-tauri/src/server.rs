@@ -968,7 +968,7 @@ fn from_quick(o: QuickOutcome) -> ApiResponse {
 /// 分类树根（走缓存 + 有界超时；取不到时返回空数组，不让整个请求失败）
 fn taxonomy_out(client: &RsrsClient) -> Vec<TaxonomyOut> {
     client
-        .list_taxonomy()
+        .list_taxonomy_fast()
         .unwrap_or_default()
         .into_iter()
         .map(TaxonomyOut::from_item)

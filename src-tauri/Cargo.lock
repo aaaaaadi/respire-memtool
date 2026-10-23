@@ -2181,6 +2181,7 @@ dependencies = [
  "tiny_http",
  "toml 0.8.2",
  "ureq",
+ "uuid",
  "windows-sys 0.59.0",
  "winreg",
 ]

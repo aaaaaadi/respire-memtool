@@ -52,6 +52,13 @@ impl TargetStore {
 
     pub fn replace(&self, incoming: Vec<QuickTarget>) -> Result<Vec<QuickTarget>, String> {
         let mut inner = self.inner.lock().unwrap();
+        // 验证 kind 字段
+        const VALID_KINDS: &[&str] = &["journal", "tree", "auto"];
+        for t in &incoming {
+            if !VALID_KINDS.contains(&t.kind.as_str()) {
+                return Err(format!("非法目标 kind: {}，合法值: journal/tree/auto", t.kind));
+            }
+        }
         inner.targets.clear();
         for t in incoming {
             inner.targets.insert(t.id.clone(), t);

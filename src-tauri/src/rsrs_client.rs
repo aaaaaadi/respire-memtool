@@ -314,6 +314,23 @@ pub struct RsrsClient {
     inner: Mutex<Inner>,
 }
 
+impl Clone for RsrsClient {
+    fn clone(&self) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            mcp_path: self.mcp_path.clone(),
+            tools: self.tools.clone(),
+            token: self.token.clone(),
+            timeout: self.timeout,
+            slow_timeout: self.slow_timeout,
+            inner: Mutex::new(Inner {
+                id: 0,
+                initialized: false,
+            }),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     id: u64,
@@ -392,7 +409,12 @@ impl RsrsClient {
             }
         });
         inner.id += 1;
-        match self.with_auth(agent.post(&self.mcp_url())).send_json(&req) {
+        // 握手用极短超时（500ms），避免不可达时拖慢只读探测
+        let handshake_agent = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .timeout(std::time::Duration::from_millis(500))
+            .build();
+        match self.with_auth(handshake_agent.post(&self.mcp_url())).send_json(&req) {
             Ok(resp) => {
                 let _ = Self::parse_http(resp, &req["id"]);
                 // 保持原有兼容行为：握手失败不阻塞后续调用，但 SSE 不再等连接关闭。
@@ -790,6 +812,44 @@ impl RsrsClient {
                 })
             })
             .collect()
+    }
+
+    /// 快速 taxonomy 调用（1s 超时），用于只读探测不阻塞 UI
+    pub fn list_taxonomy_fast(&self) -> Result<Vec<TaxonomyItem>, RsrsError> {
+        let client = self.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .try_proxy_from_env(false)
+                .timeout(std::time::Duration::from_secs(1))
+                .build();
+            let result: Result<Vec<TaxonomyItem>, RsrsError> = client.call_tool_with(&agent, &client.tools.taxonomy, &serde_json::json!({}))
+                .and_then(|env| {
+                    env.items
+                        .iter()
+                        .map(|item| {
+                            let domain = item.name.clone().unwrap_or_default();
+                            let value = item.value.clone().unwrap_or_default();
+                            let (name, description) = match value.split_once(" - ") {
+                                Some((n, d)) => (n.trim().to_string(), Some(d.trim().to_string())),
+                                None => (value.clone(), None),
+                            };
+                            let name = if name.is_empty() { value.clone() } else { name };
+                            Ok(TaxonomyItem {
+                                id: name.clone(),
+                                name,
+                                domain: Some(domain),
+                                description,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                });
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(1500)) {
+            Ok(items) => items,
+            Err(_) => Err(RsrsError::Unreachable("taxonomy 快速调用超时".into())),
+        }
     }
 
     /// memory_remember：手动/自动路径提交
