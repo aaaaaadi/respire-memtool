@@ -954,6 +954,40 @@ impl RsrsClient {
         self.call_tool_slow(&self.tools.list, &serde_json::json!({ "limit": limit }))
     }
 
+    /// 读取全部有效记忆（含日记）；用运行时有效条数确定窗口，不把 200/2000 条冒充全部。
+    pub fn list_all(&self) -> Result<Vec<ListedEntry>, RsrsError> {
+        // 1. 取当前账号有效条数；旧 Runtime 无计数时从 1000 开始逐步扩大。
+        let status = self.status()?;
+        let count = status
+            .summary
+            .as_ref()
+            .and_then(|s| s.get("local_alive"))
+            .and_then(|v| v.as_u64());
+        let expected = count
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| RsrsError::Other("记忆数量超过客户端可请求范围".into()))?;
+        if expected == Some(0) {
+            return Ok(Vec::new());
+        }
+        let mut window = expected.unwrap_or(1000).saturating_add(1);
+        loop {
+            let items = self.list_recent(window)?;
+            // 2. 返回少于请求窗口代表到达库尾；若少于自报有效数，明确提示重试而不声称完整。
+            if items.len() < window as usize {
+                if expected.map(|n| items.len() < n as usize).unwrap_or(false) {
+                    return Err(RsrsError::Mcp(
+                        "有效记忆数量与返回结果不一致，请刷新重试。".into(),
+                    ));
+                }
+                return Ok(items);
+            }
+            window = window
+                .checked_mul(2)
+                .ok_or_else(|| RsrsError::Other("记忆数量超过客户端可请求范围".into()))?;
+        }
+    }
+
     /// memory_list：最近条目（结构化，server 按 created_at 倒序）
     pub fn list_recent(&self, limit: u32) -> Result<Vec<ListedEntry>, RsrsError> {
         let env =
@@ -1047,6 +1081,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "rsrs_client_snapshot_tests.rs"]
+mod snapshot_regressions;
 
 fn looks_like_auth(s: &str) -> bool {
     let s = s.to_lowercase();
