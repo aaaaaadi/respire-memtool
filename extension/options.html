@@ -123,7 +123,7 @@
         </label>
         <label>
           <span>令牌（extension_token.txt 的内容）</span>
-          <input id="token" type="text" placeholder="粘贴 32 位令牌" spellcheck="false" />
+          <input id="token" type="password" placeholder="安装向导自动配对，也可手动填写" spellcheck="false" />
         </label>
         <div class="row">
           <button id="save" class="primary">保存</button>
@@ -150,11 +150,13 @@
 
       <ol>
         <li>先启动 memTools（托盘常驻）。</li>
-        <li>令牌文件位置：<code>%APPDATA%\com.memtools.desktop\extension_token.txt</code></li>
+        <li>推荐在 memTools 点击「安装 / 配对 Chrome 扩展」，加载生成的目录后自动完成配对。</li>
+        <li>手动设置备用令牌文件位置：<code>%APPDATA%\com.memtools.desktop\extension_token.txt</code></li>
         <li>若 config.toml 里写了固定 token，则直接填那个值。</li>
         <li>保存后，在任意网页选中文字 → 右键 →「保存到 memTools」。</li>
       </ol>
     </main>
+    <script src="settings.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

@@ -183,12 +183,15 @@ debug 构建会在第 3 项之前额外读取源码目录的 `src-tauri/config.t
 ## 浏览器扩展
 
 1. 启动 memTools，确认 `[extension] enabled = true`。
-2. 点击底栏“扩展”按钮，查看端口和令牌并复制；也可打开界面显示的 `extension_token.txt` 路径读取。
-3. 在 Chrome / Edge 打开 `chrome://extensions`，启用开发者模式，选择“加载已解压的扩展程序”，指向仓库的 `extension/` 目录。
-4. 打开扩展选项，填写端口（默认 `17650`）和令牌，用“测试连接”验证。
+2. 点击底栏“扩展” →“安装 / 配对 Chrome 扩展”，准备本机私有扩展并打开 Chrome 管理页和目录。
+3. 在 Chrome 开启开发者模式，选择“加载已解压的扩展程序”，指向已打开的 `chrome-extension` 目录；已加载此目录时点击重新加载。
+4. 配对会自动导入，无需复制令牌；可在扩展选项点击“测试连接”。
 5. 在网页中选中文字，右键选择保存为日记或自动记录。
 
-端点只绑定回环地址，并要求令牌。`extension_token.txt` 已被 `.gitignore` 忽略，请勿提交或公开。
+Chrome 的安装确认步骤仍需用户完成。备用手动接入仍可加载源码 `extension/` 并填写端口/令牌。
+端点只绑定回环地址，并要求令牌。`extension_token.txt` 和用户配置目录中的私有 `chrome-extension/pairing.json` 含本机令牌，请勿提交或分享；公开源码里的令牌为空。
+
+扩展配对回归可运行 `node --test devtools/extension-settings.test.mjs`，Rust 资源导出测试包含在 `npm test`。
 
 ## 自动更新与发布
 

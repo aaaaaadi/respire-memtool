@@ -272,14 +272,15 @@
       </div>
       <div class="ext-row">
         <span>令牌</span>
-        <input id="ext-token" type="text" readonly spellcheck="false" />
+        <input id="ext-token" type="password" readonly spellcheck="false" />
       </div>
       <div class="ext-actions">
-        <button id="ext-copy" class="mini-btn primary">复制令牌</button>
+        <button id="ext-install" class="mini-btn primary">安装 / 配对 Chrome 扩展</button>
+        <button id="ext-copy" class="mini-btn">复制令牌（备用）</button>
         <button id="ext-close" class="mini-btn">关闭</button>
       </div>
-      <div class="ext-hint">
-        Chrome / Edge 开发者模式加载 <code>extension/</code>，在扩展选项里填入端口与令牌。
+      <div class="ext-hint" id="ext-install-hint">
+        点击安装 / 配对，在 Chrome 开启开发者模式并加载已准备的目录。配对自动完成，无需复制令牌。
       </div>
     </div>
 
