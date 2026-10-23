@@ -1,7 +1,7 @@
 {
   "name": "memtools",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.5.1",
   "description": "memTools — rsrs memory desktop quick-capture app",
   "license": "MIT",
   "repository": {
