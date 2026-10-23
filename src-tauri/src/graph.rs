@@ -1056,6 +1056,32 @@ pub fn data_dir_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// 猜测 rsrs 数据目录（运行时不可达时兜底）：~/.rsrs/accounts 下最近修改的库
+pub fn guess_data_dir() -> PathBuf {
+    let base = dirs::home_dir()
+        .unwrap_or_else(|| std::env::temp_dir())
+        .join(".rsrs")
+        .join("accounts");
+    if !base.exists() {
+        return std::env::temp_dir();
+    }
+    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for entry in rd.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    if let Ok(modified) = meta.modified() {
+                        if latest.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
+                            latest = Some((entry.path(), modified));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    latest.map(|(p, _)| p).unwrap_or(base)
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------

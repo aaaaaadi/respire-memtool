@@ -20,6 +20,7 @@ pub mod selection;
 pub mod server;
 pub mod targets;
 pub mod updater;
+pub mod update_http;
 
 use std::sync::Arc;
 
@@ -36,7 +37,7 @@ struct AppState {
     config: config::AppConfig,
     client: Arc<RsrsClient>,
     /// 快捷目标（P9）：主窗、划词面板、扩展端点共用同一份数据
-    targets: Arc<targets::TargetStore>,
+    targets: Arc<std::sync::Mutex<targets::TargetStore>>,
     /// 梳理来源（P10）：小窗下拉选择，叠加在 config.toml 之上，立即生效
     processor: Arc<processor_settings::ProcessorSettings>,
 }
@@ -619,7 +620,7 @@ fn selection_expand(
     expanded: bool,
     height: Option<i32>,
 ) -> Result<(), String> {
-    selection::resize_selector(&app, sel.inner(), expanded, height)
+    selection::resize_selector(&app, sel.inner(), expanded)
 }
 
 #[tauri::command]
@@ -792,7 +793,8 @@ struct TargetsOut {
 fn taxonomy_out(state: &AppState) -> Vec<TaxonomyOut> {
     state
         .client
-        .list_taxonomy_cached()
+        .list_taxonomy()
+        .unwrap_or_default()
         .into_iter()
         .map(TaxonomyOut::from_item)
         .collect()
@@ -803,7 +805,7 @@ fn taxonomy_out(state: &AppState) -> Vec<TaxonomyOut> {
 fn quick_targets_list(state: tauri::State<'_, AppState>) -> TargetsOut {
     TargetsOut {
         ok: true,
-        targets: state.targets.list().iter().map(TargetOut::from_target).collect(),
+        targets: state.targets.lock().unwrap().list().iter().map(TargetOut::from_target).collect(),
         taxonomy: taxonomy_out(&state),
         message: String::new(),
     }
@@ -813,7 +815,7 @@ fn quick_targets_list(state: tauri::State<'_, AppState>) -> TargetsOut {
 #[tauri::command]
 fn quick_targets_save(state: tauri::State<'_, AppState>, targets: Vec<TargetIn>) -> TargetsOut {
     let incoming: Vec<targets::QuickTarget> = targets.into_iter().map(TargetIn::into_target).collect();
-    match state.targets.replace(incoming) {
+    match state.targets.lock().unwrap().replace(incoming) {
         Ok(list) => {
             let count = list.len();
             TargetsOut {
@@ -835,7 +837,7 @@ fn quick_targets_save(state: tauri::State<'_, AppState>, targets: Vec<TargetIn>)
 /// 恢复默认快捷目标（日记 → 自动判档）
 #[tauri::command]
 fn quick_targets_reset(state: tauri::State<'_, AppState>) -> TargetsOut {
-    match state.targets.reset() {
+    match state.targets.lock().unwrap().reset() {
         Ok(list) => TargetsOut {
             ok: true,
             targets: list.iter().map(TargetOut::from_target).collect(),
@@ -854,7 +856,7 @@ fn quick_targets_reset(state: tauri::State<'_, AppState>) -> TargetsOut {
 /// 划词面板用的快捷目标列表（竖排一列，第 1 个最优先）
 #[tauri::command]
 fn selection_targets(state: tauri::State<'_, AppState>) -> Vec<TargetOut> {
-    state.targets.list().iter().map(TargetOut::from_target).collect()
+    state.targets.lock().unwrap().list().iter().map(TargetOut::from_target).collect()
 }
 
 /// 按快捷目标保存划词内容
@@ -878,6 +880,8 @@ fn selection_save_target(
     }
     let target = state
         .targets
+        .lock()
+        .unwrap()
         .get(&target_id)
         .ok_or_else(|| format!("目标不存在：{target_id}"))?;
     let outcome = quick::save_to_target(
@@ -1055,7 +1059,6 @@ fn automation_submit(
         plan.suggested_parent.as_deref(),
         plan.suggested_tree.as_deref(),
         &plan.importance,
-        None,
         &automation_backup_dir(&app),
     )
     .map_err(|e| format_rsrs_err(&e))?;
@@ -1139,7 +1142,6 @@ fn automation_resolve(
         candidate.as_deref(),
         tree.as_deref(),
         &importance,
-        None,
         &automation_backup_dir(&app),
     )
     .map_err(|e| format_rsrs_err(&e))?;
@@ -1883,7 +1885,7 @@ pub fn run() {
                 .path()
                 .app_config_dir()
                 .unwrap_or_else(|_| std::env::temp_dir());
-            let target_store = Arc::new(targets::TargetStore::load(config_dir.join("targets.json")));
+            let target_store = Arc::new(std::sync::Mutex::new(targets::TargetStore::load(config_dir.join("targets.json"))));
             // 梳理来源（P10）：界面下拉写入 processor.json，叠加在 config.toml 之上
             let processor_settings = Arc::new(processor_settings::ProcessorSettings::load(
                 config_dir.join("processor.json"),
@@ -1910,7 +1912,7 @@ pub fn run() {
                         // 启动期延迟 2s，避开启动阶段的其它 rsrs 调用
                         std::thread::sleep(std::time::Duration::from_secs(2));
                         loop {
-                            warm_client.list_taxonomy_cached();
+                            warm_client.list_taxonomy();
                             std::thread::sleep(std::time::Duration::from_secs(120));
                         }
                     });

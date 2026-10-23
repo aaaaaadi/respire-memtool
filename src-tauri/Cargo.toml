@@ -22,12 +22,17 @@ toml = "0.8"
 tauri-plugin-single-instance = "2"
 # 浏览器扩展的本机 HTTP 入口（仅 127.0.0.1，同步阻塞，轻量）
 tiny_http = "0.12"
+chrono = "0.4"
+dirs = "5.0"
 # 图谱数据层：只读打开 rsrs 的 onememory.db（WAL 安全）
 rusqlite = { version = "0.32", features = ["bundled"] }
 # 解压 core-index 中的 zlib(JSON) m3 向量工件
 flate2 = "1"
 # 更新包完整性校验（SHA-256）
 sha2 = "0.10"
+[target.'cfg(windows)'.dependencies]
+# 复用锁定依赖读取当前用户的 Windows 静态系统代理。
+winreg = "=0.56.0"
 # 全局划词（P8）：Win32 鼠标钩子 / SendInput / 剪贴板序列号 / 显示器工作区
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

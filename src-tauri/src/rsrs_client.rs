@@ -8,6 +8,7 @@
 //! 红线：不启停 rsrs 服务、不使用 --direct、不 shell 拼接命令。
 
 use std::sync::Mutex;
+use std::io::{BufRead, BufReader, Cursor};
 
 use serde::{Deserialize, Serialize};
 
@@ -348,6 +349,7 @@ impl RsrsClient {
     }
 
     fn with_auth(&self, req: ureq::Request) -> ureq::Request {
+        let req = req.set("Accept", "application/json, text/event-stream");
         if self.token.is_empty() {
             req
         } else {
@@ -361,12 +363,14 @@ impl RsrsClient {
 
     fn agent(&self) -> ureq::Agent {
         ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
             .timeout(self.timeout)
             .build()
     }
 
     fn agent_slow(&self) -> ureq::Agent {
         ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
             .timeout(self.slow_timeout)
             .build()
     }
@@ -390,8 +394,8 @@ impl RsrsClient {
         inner.id += 1;
         match self.with_auth(agent.post(&self.mcp_url())).send_json(&req) {
             Ok(resp) => {
-                let _ = resp.into_string();
-                // 初始化响应不校验内容（serverInfo respire 1.0.12）；失败则直接忽略
+                let _ = Self::parse_http(resp, &req["id"]);
+                // 保持原有兼容行为：握手失败不阻塞后续调用，但 SSE 不再等连接关闭。
             }
             Err(_) => {}
         }
@@ -448,21 +452,9 @@ impl RsrsClient {
         drop(inner);
 
         let resp: serde_json::Value = match self.with_auth(agent.post(&url)).send_json(&req) {
-            Ok(r) => Self::parse_http(r)?,
+            Ok(r) | Err(ureq::Error::Status(_, r)) => Self::parse_http(r, &req["id"])?,
             Err(ureq::Error::Transport(t)) => {
                 return Err(RsrsError::Unreachable(t.to_string()));
-            }
-            Err(ureq::Error::Status(code, r)) => {
-                let body = r.into_string().unwrap_or_default();
-                if code == 401 || code == 403 {
-                    return Err(RsrsError::AuthFailed(format!("HTTP {code}: {body}")));
-                }
-                // 其他 HTTP 状态：尝试按 JSON-RPC error 解析
-                let val = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
-                if let Some(e) = val.get("error") {
-                    return Err(Self::jsonrpc_error(e));
-                }
-                return Err(RsrsError::Mcp(format!("HTTP {code}: {body}")));
             }
         };
 
@@ -533,16 +525,101 @@ impl RsrsClient {
         Ok(env)
     }
 
-    fn parse_http(resp: ureq::Response) -> Result<serde_json::Value, RsrsError> {
+    fn parse_http(
+        resp: ureq::Response,
+        expected_id: &serde_json::Value,
+    ) -> Result<serde_json::Value, RsrsError> {
         let status = resp.status();
-        let text = resp.into_string().unwrap_or_default();
+        // 状态码已足以判定鉴权失败，正文中断不能把它误报为解析错误。
         if status == 401 || status == 403 {
-            return Err(RsrsError::AuthFailed(format!("HTTP {status}: {text}")));
+            return Err(RsrsError::AuthFailed(format!("HTTP {status}")));
         }
+        let is_sse = resp
+            .header("Content-Type")
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .map(str::trim)
+            .map(|s| s.eq_ignore_ascii_case("text/event-stream"))
+            .unwrap_or(false);
+        // 1. SSE 收到本次请求的完整事件即可返回，不等待长连接关闭。
+        if (200..300).contains(&status) && is_sse {
+            return Self::read_sse(BufReader::new(resp.into_reader()), expected_id);
+        }
+        let text = resp
+            .into_string()
+            .map_err(|e| RsrsError::Parse(format!("读取响应失败：{e}")))?;
+        // 2. 无 SSE 标头的兼容端点按正文识别；错误报文仍保留原有 JSON-RPC 分类。
+        let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+        let parsed = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            serde_json::from_str(trimmed).map_err(|e| RsrsError::Parse(e.to_string()))
+        } else {
+            Self::read_sse(Cursor::new(trimmed.as_bytes()), expected_id)
+        };
         if !(200..300).contains(&status) {
-            return Err(RsrsError::Mcp(format!("HTTP {status}: {text}")));
+            if let Ok(value) = &parsed {
+                if let Some(error) = value.get("error") {
+                    return Err(Self::jsonrpc_error(error));
+                }
+            }
+            return Err(RsrsError::Mcp(format!("HTTP {status}")));
         }
-        serde_json::from_str(&text).map_err(|e| RsrsError::Parse(e.to_string()))
+        let value = parsed?;
+        if value.get("id") != Some(expected_id) {
+            return Err(RsrsError::Parse("JSON-RPC 响应 id 与请求不匹配".into()));
+        }
+        Ok(value)
+    }
+
+    /// 只返回当前请求的 result/error；心跳、通知和其他请求的事件不能冒充本次响应。
+    fn read_sse(
+        mut reader: impl BufRead,
+        expected_id: &serde_json::Value,
+    ) -> Result<serde_json::Value, RsrsError> {
+        let mut line = String::new();
+        let mut data = String::new();
+        let mut first_line = true;
+        let mut total = 0usize;
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|e| RsrsError::Parse(format!("读取 SSE 失败：{e}")))?;
+            total += n;
+            if total > 32 * 1024 * 1024 {
+                return Err(RsrsError::Parse("SSE 响应超过 32MB".into()));
+            }
+            let mut field = line.trim_end_matches(['\r', '\n']);
+            if first_line {
+                field = field.trim_start_matches('\u{feff}');
+                first_line = false;
+            }
+            // 1. 空行提交一个事件；多行 data 按 SSE 规范用换行连接。
+            if n == 0 || field.is_empty() {
+                if !data.is_empty() {
+                    let value: serde_json::Value = serde_json::from_str(&data)
+                        .map_err(|e| RsrsError::Parse(format!("SSE data JSON 无效：{e}")))?;
+                    if value.get("id") == Some(expected_id)
+                        && (value.get("result").is_some() || value.get("error").is_some())
+                    {
+                        return Ok(value);
+                    }
+                    data.clear();
+                }
+                if n == 0 {
+                    return Err(RsrsError::Parse(
+                        "SSE 中未收到匹配本次请求的 JSON-RPC 响应".into(),
+                    ));
+                }
+            } else if field == "data" || field.starts_with("data:") {
+                // 2. 忽略 event/id/retry 和注释，data 字段只去掉冒号后的一个可选空格。
+                let value = field.strip_prefix("data:").unwrap_or("");
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            }
+        }
     }
 
     fn jsonrpc_error(e: &serde_json::Value) -> RsrsError {

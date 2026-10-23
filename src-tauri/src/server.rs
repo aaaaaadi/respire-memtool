@@ -22,7 +22,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ struct Ctx<'a> {
     backup_dir: &'a Path,
     /// 唤醒主窗的回调（无界面模式为 None，此时 `/open` 不可用）
     open_main: Option<&'a OpenMain>,
-    targets: &'a TargetStore,
+    targets: &'a Mutex<TargetStore>,
 }
 
 /// 唤醒主窗并预填正文的回调（由调用方注入，端点本身不依赖 tauri 窗口）
@@ -202,7 +202,7 @@ pub fn start(
     token_path: PathBuf,
     backup_dir: PathBuf,
     app: AppHandle,
-    targets: Arc<TargetStore>,
+    targets: Arc<Mutex<TargetStore>>,
     client: Arc<RsrsClient>,
     processor: Arc<ProcessorSettings>,
 ) -> Result<Started, String> {
@@ -225,7 +225,7 @@ pub fn start_without_window(
     cfg: AppConfig,
     token_path: PathBuf,
     backup_dir: PathBuf,
-    targets: Arc<TargetStore>,
+    targets: Arc<Mutex<TargetStore>>,
     processor: Arc<ProcessorSettings>,
 ) -> Result<Started, String> {
     spawn_server(cfg, token_path, backup_dir, None, targets, None, processor)
@@ -236,7 +236,7 @@ fn spawn_server(
     token_path: PathBuf,
     backup_dir: PathBuf,
     open_main: Option<OpenMain>,
-    targets: Arc<TargetStore>,
+    targets: Arc<Mutex<TargetStore>>,
     client: Option<Arc<RsrsClient>>,
     processor: Arc<ProcessorSettings>,
 ) -> Result<Started, String> {
@@ -359,7 +359,7 @@ fn handle(mut req: Request, ctx: &Ctx<'_>) {
         (Method::Get, "/targets") => {
             let body = TargetsResponse {
                 ok: true,
-                targets: ctx.targets.list(),
+                targets: ctx.targets.lock().unwrap().list(),
                 taxonomy: taxonomy_out(ctx.client),
                 message: None,
             };
@@ -393,7 +393,7 @@ fn handle(mut req: Request, ctx: &Ctx<'_>) {
                     }
                 }
             };
-            let (code, resp) = match ctx.targets.replace(input.targets) {
+            let (code, resp) = match ctx.targets.lock().unwrap().replace(input.targets) {
                 Ok(list) => {
                     let count = list.len();
                     (
@@ -871,7 +871,6 @@ fn remember(ctx: &Ctx<'_>, input: RememberIn) -> (u16, ApiResponse) {
         candidate.as_deref(),
         tree.as_deref(),
         &plan.importance,
-        None,
         backup_dir,
     ) {
         Ok(outcome) => {
@@ -933,7 +932,7 @@ fn remember_by_target(
     page_title: Option<&str>,
     url: Option<&str>,
 ) -> (u16, ApiResponse) {
-    let Some(target) = ctx.targets.get(target_id) else {
+    let Some(target) = ctx.targets.lock().unwrap().get(target_id) else {
         return (400, ApiResponse::fail(format!("目标不存在：{target_id}")));
     };
     let source_note = source_note(page_title, url);
@@ -969,7 +968,8 @@ fn from_quick(o: QuickOutcome) -> ApiResponse {
 /// 分类树根（走缓存 + 有界超时；取不到时返回空数组，不让整个请求失败）
 fn taxonomy_out(client: &RsrsClient) -> Vec<TaxonomyOut> {
     client
-        .list_taxonomy_cached()
+        .list_taxonomy()
+        .unwrap_or_default()
         .into_iter()
         .map(TaxonomyOut::from_item)
         .collect()
@@ -1197,7 +1197,7 @@ mod tests {
         cfg.processor.agent.bin = String::new();
         cfg.processor.agent.model = String::new();
         tweak(&mut cfg);
-        let store = Arc::new(TargetStore::load(dir.join("targets.json")));
+        let store = Arc::new(std::sync::Mutex::new(TargetStore::load(dir.join("targets.json"))));
         let processor = Arc::new(ProcessorSettings::load(dir.join("processor.json")));
         let started = start_without_window(
             cfg,
@@ -1230,7 +1230,7 @@ mod tests {
         cfg.extension.port = 0;
         cfg.extension.token = String::new();
         cfg.rsrs.base_url = dead_base_url();
-        let store = Arc::new(TargetStore::load(dir.join("targets.json")));
+        let store = Arc::new(std::sync::Mutex::new(TargetStore::load(dir.join("targets.json"))));
         let processor = Arc::new(ProcessorSettings::load(dir.join("processor.json")));
         let started = start_without_window(
             cfg,
