@@ -18,15 +18,22 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+#[cfg(windows)]
 use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
 };
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
     GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos,
@@ -279,7 +286,7 @@ fn spawn_worker(
                         if state.is_visible() {
                             hide_selector(&app, &state);
                         }
-                        if let Some(payload) = grab_selection(&cfg) {
+if let Some(payload) = grab_selection(&cfg) {
                             show_selector(&app, &state, payload);
                         }
                     }
@@ -287,6 +294,25 @@ fn spawn_worker(
             }
         });
 }
+
+#[cfg(not(windows))]
+/// 非 Windows 平台：划词功能不可用，所有公共 API 做空实现
+pub fn start(_app: AppHandle, _cfg: SelectionConfig, _state: Arc<SelectionState>) {}
+
+#[cfg(not(windows))]
+pub fn set_enabled(_app: &AppHandle, _state: &SelectionState, _on: bool) {}
+
+#[cfg(not(windows))]
+pub fn resize_selector(
+    _app: &AppHandle,
+    _state: &SelectionState,
+    _expanded: bool,
+) -> Result<(), String> {
+    Err("划词功能仅支持 Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn hide_selector(_app: &AppHandle, _state: &SelectionState) {}
 
 /// 取词：跳过自身前台窗口 → 等鼠标事件落地 → 模拟 Ctrl+C → 读剪贴板 → 还原
 fn grab_selection(cfg: &SelectionConfig) -> Option<SelectionPayload> {
@@ -321,6 +347,7 @@ fn grab_selection(cfg: &SelectionConfig) -> Option<SelectionPayload> {
 }
 
 /// 模拟 Ctrl+C 并读回选中文本；完成后还原此前的剪贴板文本。
+#[cfg(windows)]
 fn capture_selected_text(timeout: Duration) -> Option<String> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
     let before = clipboard.get_text().ok();
@@ -351,6 +378,11 @@ fn capture_selected_text(timeout: Duration) -> Option<String> {
         }
     }
     grabbed
+}
+
+#[cfg(not(windows))]
+fn capture_selected_text(_timeout: Duration) -> Option<String> {
+    None
 }
 
 fn send_ctrl_c() {
@@ -491,8 +523,14 @@ fn apply_rect(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32, show: 
 }
 
 /// Tauri 的 HWND 类型随 windows crate 版本变化（isize 或裸指针），统一转成 isize
+#[cfg(windows)]
 fn raw_hwnd(win: &tauri::WebviewWindow) -> Option<isize> {
     win.hwnd().ok().map(|h| h.0 as isize)
+}
+
+#[cfg(not(windows))]
+fn raw_hwnd(_win: &tauri::WebviewWindow) -> Option<isize> {
+    None
 }
 
 fn cursor_pos() -> (i32, i32) {
