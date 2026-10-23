@@ -23,13 +23,13 @@ const viewWrite = $("#view-write");
 const viewBrowse = $("#view-browse");
 const viewSearch = $("#view-search");
 const viewRemind = $("#view-remind");
+const viewTargets = $("#view-targets");
 const viewGraph = $("#view-graph");
 const remindBadge = $("#remind-badge");
 const remindStatus = $("#remind-status");
 const remindGroups = $("#remind-groups");
 const remindRefresh = $("#remind-refresh");
 const syncBadge = $("#sync-badge");
-const indexBadge = $("#index-badge");
 const graphStage = $("#graph-stage");
 const graphCanvas = $("#graph-canvas");
 const graphStatus = $("#graph-status");
@@ -84,6 +84,16 @@ const autoState = $("#auto-state");
 const hintWrap = $("#hint-wrap");
 const hintInput = $("#hint-input");
 const charCount = $("#char-count");
+const processBtn = $("#process-btn");
+const processBar = $("#process-bar");
+const procSourceOpts = $("#proc-source-opts");
+const procSourceHint = $("#proc-source-hint");
+const targetsList = $("#targets-list");
+const targetsStatus = $("#targets-status");
+const targetsAdd = $("#targets-add");
+const targetsReset = $("#targets-reset");
+const targetsSave = $("#targets-save");
+const targetTreeList = $("#target-tree-list");
 
 // ---- 状态 ----
 const TYPE_OPTIONS = [
@@ -103,14 +113,30 @@ let browseLoading = false;
 let browseReq = 0;            // 请求序号：切分类过快时丢弃过期响应
 let searchReq = 0;            // 搜索请求序号
 let remindReq = 0;
-let appConfig = {
-  hotkey: "Ctrl+Alt+R",
-  submit_close: true,
-  port: 15169,
-  selection_supported: false,
-  update_check_on_start: true,
-};
-let runtimeStatus = null;
+let appConfig = { hotkey: "Ctrl+Alt+R", submit_close: true, port: 15169 };
+
+// ---- 快捷目标（P9）----
+const MAX_TARGETS = 8;
+const TARGET_KINDS = [
+  { value: "journal", label: "日记" },
+  { value: "tree", label: "挂到节点" },
+  { value: "auto", label: "自动判档" },
+];
+const TARGET_TYPES = [
+  "context",
+  "decision",
+  "preference",
+  "task",
+  "emotion",
+  "time",
+  "skill",
+];
+const TARGET_IMPORTANCES = [
+  { value: "important", label: "重要" },
+  { value: "trivial", label: "一般" },
+];
+let targetsDirty = false;
+let targetTaxonomy = [];
 
 // ---- 3D 图谱状态 ----
 let graphView = null;
@@ -263,6 +289,7 @@ function switchView(view) {
   viewBrowse.classList.toggle("hidden", view !== "browse");
   viewSearch.classList.toggle("hidden", view !== "search");
   viewRemind.classList.toggle("hidden", view !== "remind");
+  viewTargets.classList.toggle("hidden", view !== "targets");
   viewGraph.classList.toggle("hidden", view !== "graph");
   clearResult();
   if (view === "graph") {
@@ -275,6 +302,8 @@ function switchView(view) {
       searchInput.focus();
     } else if (view === "remind") {
       loadReminders();
+    } else if (view === "targets") {
+      loadTargets();
     } else {
       (inputMode === "free" ? inputEl : secAction).focus();
     }
@@ -883,6 +912,321 @@ function buildReminderItem(it) {
   return row;
 }
 
+// ---------------------------------------------------------------------------
+// 快捷目标（P9）：划词面板 / 网页插件共用的有序保存位置列表（第 1 个 = 最优先）
+// ---------------------------------------------------------------------------
+
+function setTargetsStatus(text, kind) {
+  targetsStatus.className = "browse-status" + (kind ? " " + kind : "");
+  targetsStatus.textContent = text || "";
+}
+
+function markTargetsDirty() {
+  targetsDirty = true;
+  setTargetsStatus("有未保存的修改");
+}
+
+function fillTargetTreeList() {
+  if (!targetTreeList) return;
+  targetTreeList.innerHTML = "";
+  const names = targetTaxonomy.length ? targetTaxonomy : taxonomy;
+  for (const item of names) {
+    const name = typeof item === "string" ? item : item && item.name;
+    if (!name) continue;
+    const opt = document.createElement("option");
+    opt.value = name;
+    targetTreeList.appendChild(opt);
+  }
+}
+
+function targetIconBtn(label, title, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "mini-btn target-icon";
+  btn.textContent = label;
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+function syncTargetKind(row) {
+  const isTree = row.querySelector(".target-kind").value === "tree";
+  row.querySelector(".target-parent").classList.toggle("hidden", !isTree);
+  row.querySelector(".target-type").classList.toggle("hidden", !isTree);
+  row.querySelector(".target-importance").classList.toggle("hidden", !isTree);
+}
+
+function buildTargetRow(target) {
+  const row = document.createElement("div");
+  row.className = "target-row";
+  row.dataset.targetId = target.id || "";
+
+  const head = document.createElement("div");
+  head.className = "target-row-head";
+
+  const badge = document.createElement("span");
+  badge.className = "target-badge";
+
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "target-name";
+  name.maxLength = 24;
+  name.value = target.label || "";
+  name.placeholder = "目标名称";
+  name.spellcheck = false;
+  name.addEventListener("input", () => {
+    markTargetsDirty();
+  });
+
+  const up = targetIconBtn("↑", "上移（更优先）", () => moveTargetRow(row, -1));
+  const down = targetIconBtn("↓", "下移", () => moveTargetRow(row, 1));
+  const del = targetIconBtn("✕", "删除该目标", () => removeTargetRow(row));
+  del.classList.add("target-del");
+
+  head.append(badge, name, up, down, del);
+
+  const fields = document.createElement("div");
+  fields.className = "target-fields";
+
+  const kind = document.createElement("select");
+  kind.className = "target-kind";
+  for (const k of TARGET_KINDS) {
+    const opt = document.createElement("option");
+    opt.value = k.value;
+    opt.textContent = k.label;
+    kind.appendChild(opt);
+  }
+  kind.value = target.kind || "tree";
+  kind.addEventListener("change", () => {
+    markTargetsDirty();
+    syncTargetKind(row);
+  });
+
+  const parent = document.createElement("input");
+  parent.type = "text";
+  parent.className = "target-parent";
+  parent.placeholder = "分类树名或记忆 id";
+  parent.value = target.parent || "";
+  parent.setAttribute("list", "target-tree-list");
+  parent.spellcheck = false;
+  parent.addEventListener("input", () => {
+    markTargetsDirty();
+  });
+
+  const type = document.createElement("select");
+  type.className = "target-type";
+  for (const t of TARGET_TYPES) {
+    const opt = document.createElement("option");
+    opt.value = t;
+    opt.textContent = t;
+    type.appendChild(opt);
+  }
+  type.value = target.type || "context";
+  type.addEventListener("change", () => {
+    markTargetsDirty();
+  });
+
+  const importance = document.createElement("select");
+  importance.className = "target-importance";
+  for (const im of TARGET_IMPORTANCES) {
+    const opt = document.createElement("option");
+    opt.value = im.value;
+    opt.textContent = im.label;
+    importance.appendChild(opt);
+  }
+  importance.value = target.importance || "important";
+  importance.addEventListener("change", () => {
+    markTargetsDirty();
+  });
+
+  fields.append(kind, parent, type, importance);
+  row.append(head, fields);
+  syncTargetKind(row);
+  return row;
+}
+
+function refreshTargetBadges() {
+  const rows = Array.from(targetsList.querySelectorAll(".target-row"));
+  rows.forEach((row, i) => {
+    const badge = row.querySelector(".target-badge");
+    if (!badge) return;
+    if (i === 0) {
+      badge.textContent = "优先";
+      badge.classList.add("primary");
+      badge.title = "第 1 个 = 最优先";
+    } else {
+      badge.textContent = String(i + 1);
+      badge.classList.remove("primary");
+      badge.title = `第 ${i + 1} 个`;
+    }
+  });
+}
+
+function moveTargetRow(row, delta) {
+  const rows = Array.from(targetsList.querySelectorAll(".target-row"));
+  const idx = rows.indexOf(row);
+  const next = idx + delta;
+  if (idx < 0 || next < 0 || next >= rows.length) return;
+  if (delta < 0) targetsList.insertBefore(row, rows[next]);
+  else targetsList.insertBefore(rows[next], row);
+  refreshTargetBadges();
+  markTargetsDirty();
+}
+
+function removeTargetRow(row) {
+  row.remove();
+  refreshTargetBadges();
+  markTargetsDirty();
+}
+
+function renderTargets(list) {
+  targetsList.innerHTML = "";
+  const items = Array.isArray(list) ? list : [];
+  items.forEach((t) => {
+    targetsList.appendChild(buildTargetRow(t || {}));
+  });
+  targetsDirty = false;
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "browse-empty";
+    empty.textContent = "还没有快捷目标，点「新增目标」加一个。";
+    targetsList.appendChild(empty);
+  }
+  refreshTargetBadges();
+}
+
+function collectTargets() {
+  const rows = Array.from(targetsList.querySelectorAll(".target-row"));
+  return rows.map((row) => {
+    const kind = row.querySelector(".target-kind").value;
+    const isTree = kind === "tree";
+    return {
+      id: row.dataset.targetId || "",
+      label: row.querySelector(".target-name").value.trim(),
+      kind,
+      parent: isTree ? row.querySelector(".target-parent").value.trim() || null : null,
+      type: isTree ? row.querySelector(".target-type").value : null,
+      importance: isTree ? row.querySelector(".target-importance").value : null,
+    };
+  });
+}
+
+async function loadTargets(force) {
+  if (targetsDirty && !force) {
+    setTargetsStatus("有未保存的修改");
+    return;
+  }
+  setTargetsStatus("读取中…");
+  try {
+    const res = await invoke()("quick_targets_list");
+    const list = Array.isArray(res?.targets) ? res.targets : [];
+    if (Array.isArray(res?.taxonomy) && res.taxonomy.length) {
+      targetTaxonomy = res.taxonomy;
+    }
+    fillTargetTreeList();
+    renderTargets(list);
+    setTargetsStatus(`${list.length} 个目标`);
+  } catch (e) {
+    targetsList.innerHTML = "";
+    setTargetsStatus(`读取失败：${e?.message || e}`, "err");
+  }
+}
+
+function newTargetId() {
+  const base = `t${Date.now()}`;
+  let id = base;
+  let seq = 0;
+  while (targetsList.querySelector(`.target-row[data-target-id="${id}"]`)) {
+    seq += 1;
+    id = `${base}-${seq}`;
+  }
+  return id;
+}
+
+function addTarget() {
+  const rows = targetsList.querySelectorAll(".target-row");
+  if (rows.length >= MAX_TARGETS) {
+    setTargetsStatus(`最多 ${MAX_TARGETS} 个快捷目标`, "err");
+    return;
+  }
+  const empty = targetsList.querySelector(".browse-empty");
+  if (empty) empty.remove();
+  const id = newTargetId();
+  const row = buildTargetRow({
+    id,
+    label: `新目标 ${rows.length + 1}`,
+    kind: "tree",
+    parent: "",
+    type: "context",
+    importance: "important",
+  });
+  targetsList.appendChild(row);
+  refreshTargetBadges();
+  markTargetsDirty();
+  const name = row.querySelector(".target-name");
+  if (name) {
+    name.focus();
+    name.select();
+  }
+}
+
+async function saveTargets() {
+  const list = collectTargets();
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    if (!t.id) {
+      setTargetsStatus(`第 ${i + 1} 个目标缺少标识`, "err");
+      return;
+    }
+    if (!t.label) {
+      setTargetsStatus(`第 ${i + 1} 个目标还没起名字`, "err");
+      return;
+    }
+    if (t.kind === "tree" && !t.parent) {
+      setTargetsStatus(`第 ${i + 1} 个目标「${t.label}」要挂节点，得先填父节点`, "err");
+      return;
+    }
+  }
+
+  setTargetsStatus("保存中…");
+  try {
+    const res = await invoke()("quick_targets_save", { targets: list });
+    if (!res || res.ok !== true) {
+      setTargetsStatus((res && res.message) || "保存失败", "err");
+      return;
+    }
+    const saved = Array.isArray(res.targets) ? res.targets : list;
+    if (Array.isArray(res.taxonomy) && res.taxonomy.length) {
+      targetTaxonomy = res.taxonomy;
+    }
+    fillTargetTreeList();
+    renderTargets(saved);
+    setTargetsStatus(`已保存 ${saved.length} 个目标`);
+  } catch (e) {
+    setTargetsStatus(`保存失败：${e?.message || e}`, "err");
+  }
+}
+
+async function resetTargets() {
+  setTargetsStatus("恢复中…");
+  try {
+    const res = await invoke()("quick_targets_reset");
+    if (!res || res.ok !== true) {
+      setTargetsStatus((res && res.message) || "恢复失败", "err");
+      return;
+    }
+    if (Array.isArray(res.taxonomy) && res.taxonomy.length) {
+      targetTaxonomy = res.taxonomy;
+    }
+    fillTargetTreeList();
+    renderTargets(Array.isArray(res.targets) ? res.targets : []);
+    setTargetsStatus(res.message || "已恢复默认目标");
+  } catch (e) {
+    setTargetsStatus(`恢复失败：${e?.message || e}`, "err");
+  }
+}
+
 // ---- 层一切换 ----
 function setTarget(target) {
   selectedTarget = target;
@@ -922,6 +1266,188 @@ function setAuto(on) {
   level3.classList.toggle("hidden", autoMode || selectedTarget !== "main");
   updateTriggerRow(false);
   clearResult();
+}
+
+// ---- 内容梳理（P10：层次一 LLM / 层次二 agent）----
+// 来源（模型 / opencode / Qoder / 关闭）由小窗下拉决定，后端存到 processor.json，
+// 点选即生效（不用改 config.toml、不用重启）。
+let processorState = null; // 后端 processor_status 快照
+let processorBusy = false;
+
+function processSource() {
+  return processorState?.source || appConfig?.processor_source || "llm";
+}
+
+function processSourceLabel() {
+  if (processorState?.source_label) return processorState.source_label;
+  const s = processSource();
+  if (s === "llm") return "模型";
+  if (s === "off") return "关闭";
+  return s;
+}
+
+/** 把后端状态同步到 appConfig + 来源按钮 */
+function applyProcessorState(st) {
+  if (!st) return;
+  processorState = st;
+  appConfig.processor_enabled = !!st.enabled;
+  appConfig.processor_source = st.source;
+  appConfig.processor_model = st.llm?.model || "";
+  appConfig.processor_agent_kind = st.agent?.kind || "";
+  appConfig.processor_agent_bin = st.agent?.bin || "";
+  renderProcessorSource();
+  updateProcessBtnTitle();
+}
+
+function renderProcessorSource() {
+  if (!procSourceOpts) return;
+  const options =
+    processorState?.options?.length > 0
+      ? processorState.options
+      : [
+          { id: "llm", label: "模型" },
+          { id: "opencode", label: "opencode" },
+          { id: "qoder", label: "Qoder" },
+          { id: "off", label: "关闭" },
+        ];
+  const current = processSource();
+  procSourceOpts.innerHTML = "";
+  for (const opt of options) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "proc-source-btn" + (opt.id === current ? " active" : "");
+    b.dataset.source = opt.id;
+    b.textContent = opt.label;
+    b.title = opt.hint || "";
+    procSourceOpts.appendChild(b);
+  }
+}
+
+function setProcHint(text, kind) {
+  if (!procSourceHint) return;
+  procSourceHint.textContent = text || "";
+  procSourceHint.classList.toggle("ok", kind === "ok");
+  procSourceHint.classList.toggle("err", kind === "err");
+}
+
+function updateProcessBtnTitle() {
+  if (!processBtn) return;
+  const via = processSourceLabel();
+  if (!appConfig.processor_enabled) {
+    processBtn.title = "梳理已关闭（可在来源里选「模型 / opencode / Qoder」）";
+  } else if (via === "模型") {
+    processBtn.title = "调用模型梳理内容（总结/结构化/起标题/翻译/提取/润色）";
+  } else {
+    processBtn.title = `调用 ${via} 梳理内容（agent headless；总结/结构化/起标题/翻译/提取/润色）`;
+  }
+}
+
+/** 读取后端状态（启动 / 打开任务条时调用） */
+async function loadProcessorStatus() {
+  try {
+    const st = await invoke()("processor_status");
+    applyProcessorState(st);
+    return st;
+  } catch (e) {
+    setProcHint(`读取梳理配置失败：${e?.message || e}`, "err");
+    return null;
+  }
+}
+
+/** 点来源按钮：立即切换并落盘，无需重启 */
+async function selectProcessorSource(id) {
+  if (processorBusy || id === processSource()) return;
+  processorBusy = true;
+  procSourceOpts?.classList.add("busy");
+  setProcHint("正在切换…");
+  try {
+    const st = await invoke()("processor_set_source", { source: id });
+    applyProcessorState(st);
+    if (id === "off") {
+      setProcHint("已关闭梳理", "ok");
+    } else if (id === "llm") {
+      setProcHint(
+        st.llm?.configured
+          ? `模型 ${st.llm.model} · ${st.llm.endpoint}`
+          : "未配置模型端点，请编辑 config.toml [processor] endpoint",
+        st.llm?.configured ? "ok" : "err"
+      );
+    } else {
+      setProcHint(`正在探测 ${st.source_label}…`);
+      probeProcessor();
+    }
+  } catch (e) {
+    setProcHint(String(e?.message || e), "err");
+    await loadProcessorStatus();
+  } finally {
+    processorBusy = false;
+    procSourceOpts?.classList.remove("busy");
+  }
+}
+
+/** 探测 agent CLI 是否可用（不发起梳理请求） */
+async function probeProcessor() {
+  try {
+    const r = await invoke()("processor_probe");
+    if (!r) return;
+    setProcHint(r.ok ? `${r.message}（${r.version}）` : r.message, r.ok ? "ok" : "err");
+  } catch (e) {
+    setProcHint(String(e?.message || e), "err");
+  }
+}
+
+function setProcessVisible(visible) {
+  if (!processBar) return;
+  processBar.classList.toggle("hidden", !visible);
+  processBtn?.classList.toggle("active", visible);
+}
+
+function closeProcessBar() {
+  setProcessVisible(false);
+}
+
+async function runProcess(task) {
+  const content = getContent();
+  if (!content) {
+    setResult("warn", "内容为空", "请先输入要梳理的内容。");
+    return;
+  }
+  if (!appConfig.processor_enabled) {
+    setResult(
+      "warn",
+      "梳理已关闭",
+      "请在「来源」里选「模型」或 opencode / Qoder 后再试（点选即生效，无需重启）。"
+    );
+    return;
+  }
+  if (content.length > 8000) {
+    setResult("err", "内容过长", `已 ${content.length} 字，超过 8000 字上限；请拆分后梳理。`);
+    return;
+  }
+  closeProcessBar();
+  const via = processSourceLabel();
+  setResult(
+    "info",
+    "正在梳理…",
+    via === "模型"
+      ? "正在调用模型处理内容，请稍候。"
+      : `正在调用 ${via} 处理内容，请稍候（agent 冷启动可能较慢）。`
+  );
+  try {
+    const res = await invoke()("process_memory", { content, task });
+    if (!res) throw new Error("Rust 命令无返回");
+    if (!res.ok) throw new Error(res.message || "梳理失败");
+    // 回填输入框：三段模式切回自由文本，用户再走自动化 / 手动落库
+    setInputMode("free");
+    inputEl.value = res.content;
+    updateCharCount();
+    updateTriggerRow(false);
+    const label = task === "title" ? "已起标题 ✓" : "已梳理 ✓";
+    setResult("ok", `${label} · ${res.source || processSource()}`, res.content);
+    inputEl.focus();
+  } catch (e) {
+    setResult("err", "梳理失败", String(e?.message || e));
+  }
 }
 
 // ---- 提交 ----
@@ -1342,6 +1868,8 @@ async function init() {
     const cfg = await invoke()("get_app_config");
     if (cfg) appConfig = Object.assign(appConfig, cfg);
   } catch (_) {}
+  // 梳理来源（以 processor_status 为准，避免配置读取失败时误判为未启用）
+  await loadProcessorStatus();
 
   // 拉取分类树
   try {
@@ -1400,6 +1928,11 @@ async function init() {
       runSearch();
     }
   });
+
+  // 快捷目标
+  targetsAdd.addEventListener("click", addTarget);
+  targetsReset.addEventListener("click", resetTargets);
+  targetsSave.addEventListener("click", saveTargets);
 
   // 3D 图谱工具栏
   graphZoom.addEventListener("click", () => graphView?.zoomToFit());
@@ -1470,7 +2003,7 @@ async function init() {
       updateBody.textContent = "正在重启…";
     });
   } catch (_) {}
-  if (appConfig.update_check_on_start !== false) checkUpdate(false);
+  checkUpdate(false);
 
   // 提醒：后台扫描线程每 interval 分钟广播到期计数
   try {
@@ -1490,18 +2023,32 @@ async function init() {
   $("#btn-close").addEventListener("click", closeApp);
   $("#btn-min").addEventListener("click", hideWindow);
 
-  indexBadge.addEventListener("click", showIndexHint);
-  indexBadge.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      showIndexHint();
-    }
-  });
-
   // 层一
   document.querySelectorAll(".seg-btn").forEach((b) =>
     b.addEventListener("click", () => setTarget(b.dataset.target))
   );
+
+  // 内容梳理（P10）：开关任务条 + 各任务点击
+  processBtn?.addEventListener("click", async () => {
+    if (processBar?.classList.contains("hidden")) {
+      setProcessVisible(true);
+      await loadProcessorStatus();
+      if (!appConfig.processor_enabled) {
+        setProcHint("梳理已关闭：选一个来源即可启用", "err");
+      }
+    } else {
+      closeProcessBar();
+    }
+  });
+  procSourceOpts?.addEventListener("click", (e) => {
+    const b = e.target.closest(".proc-source-btn");
+    if (b) selectProcessorSource(b.dataset.source);
+  });
+  processBar?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".process-task");
+    if (btn) runProcess(btn.dataset.task);
+  });
+  updateProcessBtnTitle();
 
   // 自动化开关
   autoSwitch.addEventListener("change", () => setAuto(autoSwitch.checked));
@@ -1558,20 +2105,17 @@ async function checkRuntime() {
       runtimeDot.classList.remove("offline");
       runtimeDot.title = st.message || `rsrs runtime 在线 (127.0.0.1:${appConfig.port})`;
       applySyncBadge(st);
-      applyIndexBadge(st);
     } else {
       runtimeDot.classList.add("offline");
       runtimeDot.classList.remove("online");
       runtimeDot.title = st?.message || "rsrs runtime 不可达 — 由宿主启动服务后自动恢复";
       syncBadge.classList.add("hidden");
-      hideIndexBadge();
     }
   } catch (_) {
     runtimeDot.classList.add("offline");
     runtimeDot.classList.remove("online");
     runtimeDot.title = "rsrs runtime 不可达";
     syncBadge.classList.add("hidden");
-    hideIndexBadge();
   }
 }
 
@@ -1599,36 +2143,6 @@ function applySyncBadge(st) {
   syncBadge.classList.remove("hidden");
 }
 
-function applyIndexBadge(st) {
-  runtimeStatus = st || null;
-  const hint = String(st?.index_hint || "").trim();
-  if (!st?.online || st.index_ready !== false || !hint) {
-    indexBadge.classList.add("hidden");
-    indexBadge.textContent = "";
-    indexBadge.title = "";
-    return;
-  }
-  indexBadge.textContent = "索引未就绪";
-  indexBadge.title = hint;
-  indexBadge.classList.remove("hidden");
-}
-
-function hideIndexBadge() {
-  runtimeStatus = null;
-  indexBadge.classList.add("hidden");
-  indexBadge.textContent = "";
-  indexBadge.title = "";
-}
-
-function showIndexHint() {
-  if (!runtimeStatus || runtimeStatus.index_ready !== false) return;
-  const hint =
-    String(runtimeStatus.index_hint || "").trim() ||
-    "语义索引尚未就绪，请稍后重试；期间仍可正常记录，但语义搜索结果可能不全。";
-  switchView("write");
-  setResult("warn", "索引未就绪", hint);
-}
-
 // HMR / 延迟加载时 DOMContentLoaded 可能已经过去，直接 init()
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", init);
@@ -1641,10 +2155,14 @@ window.__memtools = {
   switchView,
   runSearch,
   loadRecent,
+  loadTargets,
+  saveTargets,
+  resetTargets,
   graph: () => graphView,
   loadGraphSnapshot,
   rebuildGraphLayout,
   pollGraph,
   checkUpdate,
   installUpdate,
+  runProcess,
 };

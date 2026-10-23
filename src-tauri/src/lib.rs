@@ -6,26 +6,26 @@
 pub mod config;
 pub mod rsrs_client;
 
+pub mod agent;
 pub mod automation;
 pub mod graph;
 pub mod graph_vectors;
 pub mod llm;
+pub mod processor;
+pub mod processor_settings;
+pub mod quick;
 pub mod recent;
 pub mod reminders;
-#[cfg(windows)]
-#[path = "selection.rs"]
-mod selection;
-#[cfg(not(windows))]
-#[path = "selection_unsupported.rs"]
-mod selection;
+pub mod selection;
 pub mod server;
+pub mod targets;
 pub mod updater;
 
 use std::sync::Arc;
 
 use automation::CandidateOut;
 use rsrs_client::{RememberRequest, RsrsClient, TaxonomyItem};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WindowEvent};
@@ -35,17 +35,32 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 struct AppState {
     config: config::AppConfig,
     client: Arc<RsrsClient>,
+    /// 快捷目标（P9）：主窗、划词面板、扩展端点共用同一份数据
+    targets: Arc<targets::TargetStore>,
+    /// 梳理来源（P10）：小窗下拉选择，叠加在 config.toml 之上，立即生效
+    processor: Arc<processor_settings::ProcessorSettings>,
 }
 
 // ---------------------------------------------------------------------------
 // 命令层
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-struct TaxonomyOut {
-    id: String,
-    name: String,
-    domain: String,
+#[derive(Debug, Serialize)]
+pub(crate) struct TaxonomyOut {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) domain: String,
+}
+
+impl TaxonomyOut {
+    /// rsrs 分类树根 → 前端 DTO
+    pub(crate) fn from_item(t: TaxonomyItem) -> Self {
+        Self {
+            id: t.id,
+            name: t.name,
+            domain: t.domain.unwrap_or_default(),
+        }
+    }
 }
 
 /// 拉取 23 分类树根（人域 / AI域）
@@ -55,14 +70,7 @@ fn get_taxonomy(state: tauri::State<'_, AppState>) -> Result<Vec<TaxonomyOut>, S
         .client
         .list_taxonomy()
         .map_err(|e| format_rsrs_err(&e))?;
-    Ok(items
-        .into_iter()
-        .map(|t| TaxonomyOut {
-            id: t.id,
-            name: t.name,
-            domain: t.domain.unwrap_or_default(),
-        })
-        .collect())
+    Ok(items.into_iter().map(TaxonomyOut::from_item).collect())
 }
 
 #[derive(Serialize)]
@@ -264,13 +272,25 @@ struct AppConfigOut {
     automation_mode: String,
     llm_enabled: bool,
     reminder_enabled: bool,
-    /// 当前平台是否支持全局划词悬浮（非 Windows 前端应隐藏该功能）
-    selection_supported: bool,
-    update_check_on_start: bool,
+    /// 梳理（P10）是否启用 / 端点 / 模型
+    processor_enabled: bool,
+    processor_endpoint: String,
+    processor_model: String,
+    /// 梳理来源：`llm` 或 agent kind（`opencode` / `qoder`）
+    processor_source: String,
+    /// agent 路径是否启用（层次二）
+    processor_agent_enabled: bool,
+    /// agent kind / 可执行文件 / 模型（界面显示用）
+    processor_agent_kind: String,
+    processor_agent_bin: String,
+    processor_agent_model: String,
+    /// 界面选择落盘位置（`processor.json`）
+    processor_choice_path: String,
 }
 
 #[tauri::command]
 fn get_app_config(state: tauri::State<'_, AppState>) -> AppConfigOut {
+    let proc_cfg = state.processor.effective(&state.config.processor);
     AppConfigOut {
         hotkey: state.config.hotkey.register.clone(),
         submit_close: state.config.window.submit_close,
@@ -279,8 +299,210 @@ fn get_app_config(state: tauri::State<'_, AppState>) -> AppConfigOut {
         automation_mode: state.config.automation.mode.clone(),
         llm_enabled: state.config.automation.llm.enabled,
         reminder_enabled: state.config.reminder.enabled,
-        selection_supported: cfg!(windows),
-        update_check_on_start: state.config.update.check_on_start,
+        processor_enabled: proc_cfg.enabled,
+        processor_endpoint: proc_cfg.endpoint.clone(),
+        processor_model: proc_cfg.model.clone(),
+        processor_source: proc_cfg.source().to_string(),
+        processor_agent_enabled: proc_cfg.agent_enabled(),
+        processor_agent_kind: proc_cfg.agent.kind.clone(),
+        processor_agent_bin: proc_cfg.agent.bin.clone(),
+        processor_agent_model: proc_cfg.agent.model.clone(),
+        processor_choice_path: state.processor.path().display().to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 梳理来源（P10 层次二）：界面下拉切换，立即生效、无需改 config.toml / 重启
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct SourceOptionOut {
+    id: String,
+    label: String,
+    hint: String,
+}
+
+#[derive(Serialize)]
+struct LlmPartOut {
+    endpoint: String,
+    model: String,
+    /// 端点是否已配置（仅看配置，不发起请求）
+    configured: bool,
+}
+
+#[derive(Serialize)]
+struct AgentPartOut {
+    kind: String,
+    bin: String,
+    model: String,
+    timeout_secs: u64,
+}
+
+#[derive(Serialize)]
+struct ProcessorStatusOut {
+    /// 梳理总开关（关闭时点任务会明确提示）
+    enabled: bool,
+    /// `off` | `llm` | `opencode` | `qoder`
+    source: String,
+    source_label: String,
+    /// true = 界面选择；false = 跟随 config.toml
+    overridden: bool,
+    llm: LlmPartOut,
+    agent: AgentPartOut,
+    /// 可选来源（按钮顺序）
+    options: Vec<SourceOptionOut>,
+    choice_path: String,
+    config_path: String,
+}
+
+fn source_label(id: &str) -> &'static str {
+    match id {
+        "off" => "关闭",
+        "llm" => "模型",
+        "opencode" => "opencode",
+        "qoder" => "Qoder",
+        _ => "未知",
+    }
+}
+
+/// 界面来源：显式选择优先；否则按 config.toml（enabled=false 视为 off）
+fn effective_source_id(
+    choice: &processor_settings::ProcessorChoice,
+    cfg: &config::ProcessorConfig,
+) -> String {
+    if !choice.source.is_empty() {
+        return choice.source.clone();
+    }
+    if !cfg.enabled {
+        return "off".into();
+    }
+    cfg.source().to_string()
+}
+
+fn build_processor_status(state: &AppState) -> ProcessorStatusOut {
+    let choice = state.processor.get();
+    let proc_cfg = state.processor.effective(&state.config.processor);
+    let source = effective_source_id(&choice, &state.config.processor);
+    let options = vec![
+        SourceOptionOut {
+            id: "llm".into(),
+            label: "模型".into(),
+            hint: "直连 OpenAI 兼容端点（config.toml [processor] endpoint）".into(),
+        },
+        SourceOptionOut {
+            id: "opencode".into(),
+            label: "opencode".into(),
+            hint: "本地 opencode headless，可读项目上下文，较慢（20–40s）".into(),
+        },
+        SourceOptionOut {
+            id: "qoder".into(),
+            label: "Qoder".into(),
+            hint: "本地 Qoder CLI，需先执行 qodercli /login 登录".into(),
+        },
+        SourceOptionOut {
+            id: "off".into(),
+            label: "关闭".into(),
+            hint: "关闭梳理，任务按钮会提示未启用".into(),
+        },
+    ];
+    ProcessorStatusOut {
+        enabled: proc_cfg.enabled,
+        source_label: source_label(&source).to_string(),
+        source,
+        overridden: !choice.source.is_empty(),
+        llm: LlmPartOut {
+            configured: !proc_cfg.endpoint.trim().is_empty(),
+            endpoint: proc_cfg.endpoint.clone(),
+            model: proc_cfg.model.clone(),
+        },
+        agent: AgentPartOut {
+            kind: proc_cfg.agent.kind.clone(),
+            bin: proc_cfg.agent.bin.clone(),
+            model: proc_cfg.agent.model.clone(),
+            timeout_secs: proc_cfg.agent.timeout_secs,
+        },
+        options,
+        choice_path: state.processor.path().display().to_string(),
+        config_path: config::AppConfig::path().display().to_string(),
+    }
+}
+
+#[tauri::command]
+fn processor_status(state: tauri::State<'_, AppState>) -> ProcessorStatusOut {
+    build_processor_status(&state)
+}
+
+/// 切换来源（`off` / `llm` / `opencode` / `qoder`）；可选覆盖模型与 bin
+#[tauri::command]
+fn processor_set_source(
+    state: tauri::State<'_, AppState>,
+    source: String,
+    model: Option<String>,
+    agent_model: Option<String>,
+    agent_bin: Option<String>,
+) -> Result<ProcessorStatusOut, String> {
+    let mut choice = state.processor.get();
+    choice.source = source;
+    if let Some(v) = model {
+        choice.model = v;
+    }
+    if let Some(v) = agent_model {
+        choice.agent_model = v;
+    }
+    if let Some(v) = agent_bin {
+        choice.agent_bin = v;
+    }
+    state.processor.set(choice)?;
+    Ok(build_processor_status(&state))
+}
+
+/// 回到 config.toml 的默认来源
+#[tauri::command]
+fn processor_reset_source(
+    state: tauri::State<'_, AppState>,
+) -> Result<ProcessorStatusOut, String> {
+    state.processor.reset()?;
+    Ok(build_processor_status(&state))
+}
+
+#[derive(Serialize)]
+struct AgentProbeOut {
+    ok: bool,
+    kind: String,
+    bin: String,
+    version: String,
+    message: String,
+}
+
+/// 探测当前来源的 agent CLI 是否可用（本地执行，约 1s；不会发起梳理请求）
+#[tauri::command]
+fn processor_probe(state: tauri::State<'_, AppState>) -> AgentProbeOut {
+    let proc_cfg = state.processor.effective(&state.config.processor);
+    let kind = proc_cfg.agent.kind.clone();
+    if !proc_cfg.agent_enabled() {
+        return AgentProbeOut {
+            ok: false,
+            kind,
+            bin: String::new(),
+            version: String::new(),
+            message: "当前来源不是 agent（模型 / 关闭）".into(),
+        };
+    }
+    match agent::probe(&proc_cfg.agent) {
+        Ok((kind, bin, version)) => AgentProbeOut {
+            ok: true,
+            kind: kind.as_str().to_string(),
+            bin: bin.clone(),
+            version,
+            message: format!("{} 可用：{bin}", kind.as_str()),
+        },
+        Err(e) => AgentProbeOut {
+            ok: false,
+            kind,
+            bin: String::new(),
+            version: String::new(),
+            message: e,
+        },
     }
 }
 
@@ -327,12 +549,6 @@ struct RuntimeStatus {
     conflicts: u64,
     last_sync: Option<i64>,
     phase: Option<String>,
-    /// 语义检索索引可用（旧版 rsrs 无该字段时视为可用）
-    index_ready: bool,
-    index_state: Option<String>,
-    index_error: Option<String>,
-    /// 索引未就绪时的可操作提示（就绪或离线时为空）
-    index_hint: String,
 }
 
 #[tauri::command]
@@ -356,11 +572,7 @@ fn runtime_status(state: tauri::State<'_, AppState>) -> RuntimeStatus {
                 pending,
                 conflicts: s.conflicts,
                 last_sync: s.last_sync,
-                phase: s.phase.clone(),
-                index_ready: s.index_ready,
-                index_state: s.index_state.clone(),
-                index_error: s.index_error.clone(),
-                index_hint: index_hint(&s),
+                phase: s.phase,
             }
         }
         Err(e) => RuntimeStatus {
@@ -372,10 +584,6 @@ fn runtime_status(state: tauri::State<'_, AppState>) -> RuntimeStatus {
             conflicts: 0,
             last_sync: None,
             phase: None,
-            index_ready: true,
-            index_state: None,
-            index_error: None,
-            index_hint: String::new(),
         },
     }
 }
@@ -409,13 +617,26 @@ fn selection_expand(
     app: AppHandle,
     sel: tauri::State<'_, Arc<selection::SelectionState>>,
     expanded: bool,
+    height: Option<i32>,
 ) -> Result<(), String> {
-    selection::resize_selector(&app, sel.inner(), expanded)
+    selection::resize_selector(&app, sel.inner(), expanded, height)
 }
 
 #[tauri::command]
 fn selection_hide(app: AppHandle, sel: tauri::State<'_, Arc<selection::SelectionState>>) {
     selection::hide_selector(&app, sel.inner());
+}
+
+/// 打开主窗并聚焦；带文字时预填正文（划词面板与扩展 `/open` 共用）
+pub fn open_main_window(app: &AppHandle, text: Option<&str>) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = win.show();
+    let _ = win.set_focus();
+    if let Some(t) = text.map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = win.emit("selection-prefill", t);
+    }
 }
 
 #[tauri::command]
@@ -425,13 +646,7 @@ fn selection_open_main(
     text: Option<String>,
 ) {
     let target = text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
-        if let Some(t) = target {
-            let _ = win.emit("selection-prefill", t);
-        }
-    }
+    open_main_window(&app, target.as_deref());
     selection::hide_selector(&app, sel.inner());
 }
 
@@ -440,6 +655,30 @@ struct QuickSave {
     ok: bool,
     id: Option<String>,
     message: String,
+    /// 落库标题（快捷目标挂树时由正文生成）
+    title: Option<String>,
+    /// 实际执行的分支：journal | create | auto
+    branch: Option<String>,
+    /// 需用户核对（判重候选悬空 / 破坏性分支降级为挂）
+    needs_confirm: bool,
+}
+
+impl QuickSave {
+    fn from_quick(o: quick::QuickOutcome) -> Self {
+        let message = if o.needs_confirm {
+            format!("{}已挂到相似条目下，请到 memTools 核对。", o.message)
+        } else {
+            o.message
+        };
+        Self {
+            ok: o.ok,
+            id: o.id,
+            message,
+            title: o.title,
+            branch: Some(o.branch),
+            needs_confirm: o.needs_confirm,
+        }
+    }
 }
 
 #[tauri::command]
@@ -466,6 +705,9 @@ fn selection_journal(state: tauri::State<'_, AppState>, text: String) -> Result<
             ok: false,
             id: None,
             message: "rsrs 返回判重候选但未写入（候选悬空），请到 memTools 中择一处理。".into(),
+            title: None,
+            branch: Some("journal".into()),
+            needs_confirm: true,
         });
     }
     let id = res.summary.as_ref().and_then(|s| s.id.clone());
@@ -473,7 +715,181 @@ fn selection_journal(state: tauri::State<'_, AppState>, text: String) -> Result<
         ok: true,
         id,
         message: format!("已存为日记（{} 条）", res.count.unwrap_or(1)),
+        title: None,
+        branch: Some("journal".into()),
+        needs_confirm: false,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 快捷目标（P9）
+// ---------------------------------------------------------------------------
+
+/// 快捷目标（出参）：`type` 字段序列化后为 "type"
+#[derive(Serialize, Clone)]
+pub(crate) struct TargetOut {
+    id: String,
+    label: String,
+    kind: String,
+    parent: Option<String>,
+    r#type: Option<String>,
+    importance: Option<String>,
+}
+
+impl TargetOut {
+    fn from_target(t: &targets::QuickTarget) -> Self {
+        Self {
+            id: t.id.clone(),
+            label: t.label.clone(),
+            kind: t.kind.clone(),
+            parent: t.parent.clone(),
+            r#type: t.r#type.clone(),
+            importance: t.importance.clone(),
+        }
+    }
+}
+
+/// 快捷目标（入参）
+#[derive(Deserialize)]
+pub(crate) struct TargetIn {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    importance: Option<String>,
+}
+
+impl TargetIn {
+    fn into_target(self) -> targets::QuickTarget {
+        targets::QuickTarget {
+            id: self.id,
+            label: self.label,
+            kind: self.kind,
+            parent: self.parent,
+            r#type: self.r#type,
+            importance: self.importance,
+        }
+    }
+}
+
+/// 快捷目标列表响应
+#[derive(Serialize)]
+struct TargetsOut {
+    ok: bool,
+    targets: Vec<TargetOut>,
+    taxonomy: Vec<TaxonomyOut>,
+    message: String,
+}
+
+/// 分类树根（走缓存 + 有界超时；取不到时给空数组，不让整个命令失败）
+fn taxonomy_out(state: &AppState) -> Vec<TaxonomyOut> {
+    state
+        .client
+        .list_taxonomy_cached()
+        .into_iter()
+        .map(TaxonomyOut::from_item)
+        .collect()
+}
+
+/// 读取快捷目标列表
+#[tauri::command]
+fn quick_targets_list(state: tauri::State<'_, AppState>) -> TargetsOut {
+    TargetsOut {
+        ok: true,
+        targets: state.targets.list().iter().map(TargetOut::from_target).collect(),
+        taxonomy: taxonomy_out(&state),
+        message: String::new(),
+    }
+}
+
+/// 保存快捷目标列表（失败不回异常，把原因带给前端显示）
+#[tauri::command]
+fn quick_targets_save(state: tauri::State<'_, AppState>, targets: Vec<TargetIn>) -> TargetsOut {
+    let incoming: Vec<targets::QuickTarget> = targets.into_iter().map(TargetIn::into_target).collect();
+    match state.targets.replace(incoming) {
+        Ok(list) => {
+            let count = list.len();
+            TargetsOut {
+                ok: true,
+                targets: list.iter().map(TargetOut::from_target).collect(),
+                taxonomy: taxonomy_out(&state),
+                message: format!("已保存 {count} 个快捷目标"),
+            }
+        }
+        Err(e) => TargetsOut {
+            ok: false,
+            targets: Vec::new(),
+            taxonomy: Vec::new(),
+            message: e,
+        },
+    }
+}
+
+/// 恢复默认快捷目标（日记 → 自动判档）
+#[tauri::command]
+fn quick_targets_reset(state: tauri::State<'_, AppState>) -> TargetsOut {
+    match state.targets.reset() {
+        Ok(list) => TargetsOut {
+            ok: true,
+            targets: list.iter().map(TargetOut::from_target).collect(),
+            taxonomy: taxonomy_out(&state),
+            message: "已恢复默认快捷目标".into(),
+        },
+        Err(e) => TargetsOut {
+            ok: false,
+            targets: Vec::new(),
+            taxonomy: Vec::new(),
+            message: e,
+        },
+    }
+}
+
+/// 划词面板用的快捷目标列表（竖排一列，第 1 个最优先）
+#[tauri::command]
+fn selection_targets(state: tauri::State<'_, AppState>) -> Vec<TargetOut> {
+    state.targets.list().iter().map(TargetOut::from_target).collect()
+}
+
+/// 按快捷目标保存划词内容
+#[tauri::command]
+fn selection_save_target(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    text: String,
+    target_id: String,
+) -> Result<QuickSave, String> {
+    let content = text.trim().to_string();
+    if content.is_empty() {
+        return Err("选中内容为空".into());
+    }
+    if content.chars().count() > MAX_CONTENT_CHARS {
+        return Err(format!(
+            "内容过长（{} 字，上限 {} 字），请到 memTools 中分段记录。",
+            content.chars().count(),
+            MAX_CONTENT_CHARS
+        ));
+    }
+    let target = state
+        .targets
+        .get(&target_id)
+        .ok_or_else(|| format!("目标不存在：{target_id}"))?;
+    let outcome = quick::save_to_target(
+        &state.client,
+        &state.config,
+        &automation_backup_dir(&app),
+        &target,
+        &content,
+        None,
+    )
+    .map_err(|e| e)?;
+    Ok(QuickSave::from_quick(outcome))
 }
 
 // ---------------------------------------------------------------------------
@@ -584,20 +1000,12 @@ fn automation_submit(
     // 模型判档 / 判树（P2 模型路径）：失败回退本地并告警，不静默
     let mut model_warnings = Vec::new();
     let verdict = if cfg.mode != "local-fallback" && cfg.llm.enabled {
-        if cfg.llm.endpoint.trim().is_empty() {
-            model_warnings.push(
-                "未配置 [automation.llm] endpoint，已用本地判档；如需模型判档请填写任意 OpenAI 兼容端点。"
-                    .into(),
-            );
-            None
-        } else {
-            let trees: Vec<String> = taxonomy.iter().map(|t| t.name.clone()).collect();
-            match llm::judge(&cfg.llm, &content, hint.as_deref(), &trees) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    model_warnings.push(format!("模型判档失败，已回退本地：{e}"));
-                    None
-                }
+        let trees: Vec<String> = taxonomy.iter().map(|t| t.name.clone()).collect();
+        match llm::judge(&cfg.llm, &content, hint.as_deref(), &trees) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                model_warnings.push(format!("模型判档失败，已回退本地：{e}"));
+                None
             }
         }
     } else {
@@ -632,7 +1040,7 @@ fn automation_submit(
         &cfg,
         verdict.as_ref(),
     )
-    .map_err(|e| with_index_hint(&state.client, format_rsrs_err(&e)))?;
+    .map_err(|e| format_rsrs_err(&e))?;
     plan.warnings.extend(norm_warnings);
     plan.warnings.extend(model_warnings);
 
@@ -647,6 +1055,7 @@ fn automation_submit(
         plan.suggested_parent.as_deref(),
         plan.suggested_tree.as_deref(),
         &plan.importance,
+        None,
         &automation_backup_dir(&app),
     )
     .map_err(|e| format_rsrs_err(&e))?;
@@ -730,6 +1139,7 @@ fn automation_resolve(
         candidate.as_deref(),
         tree.as_deref(),
         &importance,
+        None,
         &automation_backup_dir(&app),
     )
     .map_err(|e| format_rsrs_err(&e))?;
@@ -752,6 +1162,47 @@ fn automation_resolve(
             .push(format!("query-log 自评（good）失败：{e}"));
     }
     Ok(AutomationDto::from_outcome(outcome))
+}
+
+// ---------------------------------------------------------------------------
+// 内容梳理（P10 层次一：直接调 LLM）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ProcessResult {
+    ok: bool,
+    task: Option<String>,
+    /// 处理后的正文（标题任务为压平后的标题）
+    content: String,
+    /// 实际来源：`llm` 或 agent kind（`opencode` / `qoder`）
+    source: String,
+    message: String,
+}
+
+/// 梳理内容：总结 / 结构化 / 起标题 / 翻译 / 提取 / 润色。
+///
+/// 只返回处理结果，不写库；由前端回填输入框后再走自动化 / 手动落库。
+/// 来源由配置决定：`[processor] agent_endpoint` / `[processor.agent] enabled` → agent，
+/// 否则直连 OpenAI 兼容 LLM。
+#[tauri::command]
+fn process_memory(
+    state: tauri::State<'_, AppState>,
+    content: String,
+    task: String,
+    lang: Option<String>,
+) -> Result<ProcessResult, String> {
+    let task = processor::Task::parse(&task)
+        .ok_or_else(|| format!("未知任务：{}", task.trim()))?;
+    let proc_cfg = state.processor.effective(&state.config.processor);
+    let out = processor::process(&proc_cfg, &content, &task, lang.as_deref())?;
+    let source = proc_cfg.source().to_string();
+    Ok(ProcessResult {
+        ok: true,
+        task: Some(task.as_str().to_string()),
+        content: out,
+        message: format!("已{}（{} · {source}）", task.label(), task.as_str()),
+        source,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -985,7 +1436,7 @@ fn search_memory(
     let candidates = state
         .client
         .recall_candidates(&q, limit)
-        .map_err(|e| with_index_hint(&state.client, format_rsrs_err(&e)))?;
+        .map_err(|e| format_rsrs_err(&e))?;
     let items = candidates
         .into_iter()
         .map(|c| SearchItemOut {
@@ -1147,10 +1598,7 @@ async fn graph_snapshot(
 ) -> Result<graph::GraphSnapshot, String> {
     let data_dir = match state.client.data_dir() {
         Ok(d) => std::path::PathBuf::from(d),
-        Err(_) => graph::data_dir_override().ok_or_else(|| {
-            "runtime 不可达，无法确定当前账号的数据目录。\n请先启动 rsrs runtime；如确需离线查看，可设置环境变量 RSRS_DATA_DIR 指向该账号的数据目录。"
-                .to_string()
-        })?,
+        Err(_) => graph::guess_data_dir(),
     };
     let svc = graph.inner().clone();
     tauri::async_runtime::spawn_blocking(move || svc.snapshot(&data_dir))
@@ -1224,36 +1672,6 @@ fn set_graph_window(
 /// 标题生成（12-24 字事件事实，禁主题名当标题）—— 统一走 automation 模块
 fn build_title(content: &str) -> String {
     automation::build_title(content)
-}
-
-/// 语义索引未就绪时的可操作提示（就绪则返回空串）
-pub(crate) fn index_hint(info: &rsrs_client::StatusInfo) -> String {
-    if info.index_ready {
-        return String::new();
-    }
-    let state = info.index_state.as_deref().unwrap_or("unknown");
-    let mut hint = format!(
-        "rsrs 语义索引未就绪（state={state}）：自动化判重、语义搜索与图谱向量会失败。请在 rsrs 端完成检索模型初始化并等待索引构建完成，用 `rsrs status --json` 查看 retrieval_index.state；完成后点重试。期间手动记录、最近记忆与 id 搜索仍可用。"
-    );
-    if let Some(err) = info.index_error.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        hint.push_str(&format!("\n索引错误：{err}"));
-    }
-    hint
-}
-
-/// 失败信息可能只是索引未就绪的表象：查询状态后附上提示，保留原始错误
-pub(crate) fn with_index_hint(client: &RsrsClient, message: String) -> String {
-    match client.status_info() {
-        Ok(info) if !info.index_ready => {
-            let hint = index_hint(&info);
-            if hint.is_empty() || message.contains(&hint) {
-                message
-            } else {
-                format!("{message}\n{hint}")
-            }
-        }
-        _ => message,
-    }
 }
 
 /// 错误分类 → 用户可读文案
@@ -1351,13 +1769,12 @@ fn toggle_window(app: &AppHandle) {
 /// 关闭窗口（✕）只隐藏，进程常驻，热键与托盘持续可用。
 fn setup_tray(app: &AppHandle, selection_enabled: bool) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
-    let selection_supported = cfg!(windows);
     let selection_item = CheckMenuItem::with_id(
         app,
         "selection",
         "划词悬浮",
-        selection_supported,
-        selection_enabled && selection_supported,
+        true,
+        selection_enabled,
         None::<&str>,
     )?;
     let quit_item = MenuItem::with_id(app, "quit", "退出 memTools", true, None::<&str>)?;
@@ -1443,21 +1860,7 @@ async fn update_install(
     .map_err(|e| format!("更新线程失败：{e}"))?
 }
 
-/// rsrs 令牌：环境变量优先（RSRS_TOKEN > RSRS_AUTH_TOKEN），否则用配置
-pub(crate) fn resolve_rsrs_token(cfg: &config::RsrsConfig) -> String {
-    for key in ["RSRS_TOKEN", "RSRS_AUTH_TOKEN"] {
-        if let Ok(v) = std::env::var(key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_string();
-            }
-        }
-    }
-    cfg.auth_token.trim().to_string()
-}
-
 pub fn run() {
-    config::ensure_user_config();
     let default_config = config::AppConfig::load();
 
     tauri::Builder::default()
@@ -1474,20 +1877,47 @@ pub fn run() {
                 })
                 .build(),
         )
-        .manage(AppState {
-            config: default_config.clone(),
-            client: Arc::new(
-                RsrsClient::new(
-                    default_config.rsrs.base_url.clone(),
-                    default_config.rsrs.mcp_path.clone(),
-                    default_config.rsrs.tools.clone(),
-                    default_config.rsrs.timeout_secs,
-                    default_config.rsrs.op_timeout_secs,
-                )
-                .with_token(resolve_rsrs_token(&default_config.rsrs)),
-            ),
-        })
         .setup(move |app| {
+            // 全局状态：config 已在 Builder 阶段载入；快捷目标存储需等应用配置目录可解析
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let target_store = Arc::new(targets::TargetStore::load(config_dir.join("targets.json")));
+            // 梳理来源（P10）：界面下拉写入 processor.json，叠加在 config.toml 之上
+            let processor_settings = Arc::new(processor_settings::ProcessorSettings::load(
+                config_dir.join("processor.json"),
+            ));
+            let client = Arc::new(RsrsClient::new(
+                default_config.rsrs.base_url.clone(),
+                default_config.rsrs.mcp_path.clone(),
+                default_config.rsrs.tools.clone(),
+                default_config.rsrs.timeout_secs,
+                default_config.rsrs.op_timeout_secs,
+            ));
+            app.manage(AppState {
+                config: default_config.clone(),
+                client: client.clone(),
+                targets: target_store.clone(),
+                processor: processor_settings.clone(),
+            });
+            // 分类树缓存预热：后台线程每 120s 刷新一次，让首次 /targets 通常直接命中缓存
+            {
+                let warm_client = client.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("memtools-taxonomy-refresh".into())
+                    .spawn(move || {
+                        // 启动期延迟 2s，避开启动阶段的其它 rsrs 调用
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        loop {
+                            warm_client.list_taxonomy_cached();
+                            std::thread::sleep(std::time::Duration::from_secs(120));
+                        }
+                    });
+                if let Err(e) = spawned {
+                    eprintln!("[memTools] 分类树预热线程启动失败：{e}");
+                }
+            }
             // 应用 config.toml 窗口尺寸（默认 480x560）
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(PhysicalSize::new(
@@ -1576,6 +2006,10 @@ pub fn run() {
                     default_config.clone(),
                     token_path.clone(),
                     automation_backup_dir(app.handle()),
+                    app.handle().clone(),
+                    target_store.clone(),
+                    client.clone(),
+                    processor_settings.clone(),
                 ) {
                     Ok(s) => eprintln!(
                         "[memTools] 浏览器扩展端点已启动 http://127.0.0.1:{}（令牌文件：{}）",
@@ -1605,8 +2039,18 @@ pub fn run() {
             selection_hide,
             selection_open_main,
             selection_journal,
+            selection_targets,
+            selection_save_target,
+            quick_targets_list,
+            quick_targets_save,
+            quick_targets_reset,
             automation_submit,
             automation_resolve,
+            process_memory,
+            processor_status,
+            processor_set_source,
+            processor_reset_source,
+            processor_probe,
             list_recent,
             search_memory,
             memory_path,
@@ -1628,6 +2072,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::looks_like_memory_id;
+    use super::{TargetIn, TargetOut};
 
     #[test]
     fn id_prefix_and_uuid() {
@@ -1642,6 +2087,43 @@ mod tests {
         assert!(!looks_like_memory_id("hello"));
         assert!(!looks_like_memory_id("bd22ad3g"));
         assert!(!looks_like_memory_id("1234"));
+    }
+
+    #[test]
+    fn target_out_serializes_type_field() {
+        let out = TargetOut {
+            id: "t1".into(),
+            label: "AI 挂点".into(),
+            kind: "tree".into(),
+            parent: Some("AI-domain".into()),
+            r#type: Some("decision".into()),
+            importance: Some("important".into()),
+        };
+        let v = serde_json::to_value(&out).expect("应能序列化");
+        assert_eq!(v["id"], serde_json::json!("t1"));
+        assert_eq!(v["type"], serde_json::json!("decision"));
+        assert_eq!(v["parent"], serde_json::json!("AI-domain"));
+        assert_eq!(v["importance"], serde_json::json!("important"));
+    }
+
+    #[test]
+    fn target_in_parses_type_field() {
+        let v: TargetIn = serde_json::from_str(
+            r#"{"id":"t1","label":"AI 挂点","kind":"tree","parent":"AI-domain","type":"decision","importance":"important"}"#,
+        )
+        .expect("应能解析");
+        assert_eq!(v.id, "t1");
+        assert_eq!(v.r#type.as_deref(), Some("decision"));
+        assert_eq!(v.parent.as_deref(), Some("AI-domain"));
+    }
+
+    #[test]
+    fn target_in_tolerates_missing_fields() {
+        let v: TargetIn = serde_json::from_str(r#"{"id":"t1"}"#).expect("应能解析");
+        assert_eq!(v.id, "t1");
+        assert!(v.label.is_empty());
+        assert!(v.kind.is_empty());
+        assert!(v.r#type.is_none());
     }
 }
 

@@ -66,6 +66,57 @@ pub fn extract_json(text: &str) -> Option<String> {
     Some(text[start..=end].to_string())
 }
 
+/// 通用 OpenAI 兼容 chat 调用：返回 `choices[0].message.content` 原文。
+///
+/// 供判档（`judge`）与内容梳理（`processor`）共用同一套 HTTP / 鉴权 / 解析逻辑。
+pub fn chat(cfg: &LlmConfig, system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
+    if cfg.endpoint.trim().is_empty() {
+        return Err("未配置模型端点（config.toml [automation.llm] endpoint）".into());
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(cfg.timeout_secs.max(5)))
+        .build();
+    let mut req = agent
+        .post(cfg.endpoint.trim())
+        .set("Content-Type", "application/json");
+    let key = cfg.api_key.trim();
+    if !key.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
+        ]
+    });
+
+    let resp: serde_json::Value = match req.send_json(body) {
+        Ok(r) => r
+            .into_json()
+            .map_err(|e| format!("模型响应不是 JSON: {e}"))?,
+        Err(ureq::Error::Transport(t)) => return Err(format!("模型端点不可达: {t}")),
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            return Err(format!(
+                "模型端点 HTTP {code}: {}",
+                body.chars().take(200).collect::<String>()
+            ));
+        }
+    };
+
+    resp
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "模型响应缺少 choices[0].message.content".to_string())
+}
+
 /// 调用模型；成功返回已过滤的判档结果（字段为空表示不可用，由调用方回退）
 pub fn judge(
     cfg: &LlmConfig,
@@ -73,9 +124,6 @@ pub fn judge(
     hint: Option<&str>,
     trees: &[String],
 ) -> Result<Verdict, String> {
-    if cfg.endpoint.trim().is_empty() {
-        return Err("未配置模型端点（config.toml [automation.llm] endpoint）".into());
-    }
     let head = content.chars().take(3000).collect::<String>();
     let hint_line = hint
         .map(str::trim)
@@ -96,46 +144,9 @@ pub fn judge(
 输出格式：{{\"importance\":\"important|trivial\",\"tree\":\"分类名或空\",\"title\":\"标题\",\"reason\":\"理由\"}}"
     );
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(cfg.timeout_secs.max(5)))
-        .build();
-    let mut req = agent
-        .post(cfg.endpoint.trim())
-        .set("Content-Type", "application/json");
-    let key = cfg.api_key.trim();
-    if !key.is_empty() {
-        req = req.set("Authorization", &format!("Bearer {key}"));
-    }
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "temperature": 0,
-        "max_tokens": 500,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user }
-        ]
-    });
+    let text = chat(cfg, system, &user, 500)?;
 
-    let resp: serde_json::Value = match req.send_json(body) {
-        Ok(r) => r
-            .into_json()
-            .map_err(|e| format!("模型响应不是 JSON: {e}"))?,
-        Err(ureq::Error::Transport(t)) => return Err(format!("模型端点不可达: {t}")),
-        Err(ureq::Error::Status(code, r)) => {
-            let body = r.into_string().unwrap_or_default();
-            return Err(format!("模型端点 HTTP {code}: {}", body.chars().take(200).collect::<String>()));
-        }
-    };
-
-    let text = resp
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .ok_or_else(|| "模型响应缺少 choices[0].message.content".to_string())?;
-
-    let json = extract_json(text).ok_or_else(|| {
+    let json = extract_json(&text).ok_or_else(|| {
         format!(
             "模型未返回 JSON：{}",
             text.chars().take(200).collect::<String>()

@@ -1,18 +1,4 @@
-//! memTools 配置：读取 config.toml（热键/端口/自动化模式/窗口行为）
-//!
-//! 查找顺序（第一个存在的文件生效）：
-//! 1. 环境变量 `MEMTOOLS_CONFIG`（绝对路径）
-//! 2. 可执行文件同目录的 `config.toml`（绿色便携）
-//! 3. 用户配置目录：Windows `%APPDATA%\com.memtools.desktop\config.toml`，
-//!    macOS `~/Library/Application Support/com.memtools.desktop/config.toml`，
-//!    Linux `$XDG_CONFIG_HOME/com.memtools.desktop/config.toml`（否则 `~/.config/...`）
-//! 4. 仅 debug 构建：`{CARGO_MANIFEST_DIR}/config.toml`（开发便利，release 不参与）
-//! 5. 编译进二进制内的默认模板（`include_str!`）
-//!
-//! 因此二进制不再绑定构建机路径；release 用户可通过 exe 旁的 config.toml
-//! 或用户配置目录覆盖默认值。
-
-use std::path::PathBuf;
+//! memTools 配置：读取 src-tauri/config.toml（热键/端口/自动化模式/窗口行为）
 
 use serde::Deserialize;
 
@@ -34,6 +20,9 @@ pub struct AppConfig {
     /// 提醒机制（P5）；旧配置文件缺该段时用默认值
     #[serde(default)]
     pub reminder: ReminderConfig,
+    /// 内容梳理 / 分析（P10 层次一：直接调 LLM）；旧配置文件缺该段时用默认值
+    #[serde(default)]
+    pub processor: ProcessorConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,9 +46,6 @@ pub struct RsrsConfig {
     pub base_url: String,
     /// MCP over HTTP 端点路径（POST {base_url}/{mcp_path}）
     pub mcp_path: String,
-    /// 可选鉴权令牌：非空时作为 `Authorization: Bearer <token>` 发送
-    #[serde(default)]
-    pub auth_token: String,
     pub timeout_secs: u64,
     /// 慢操作超时（remember/recall/update/attach/show/tree）—— 插件 hook 可能耗时 >5s
     #[serde(default = "default_op_timeout")]
@@ -127,15 +113,12 @@ fn default_attach_threshold() -> f64 {
     0.70
 }
 
-/// 模型判档路径：任意 OpenAI 兼容 `/v1/chat/completions`。
+/// 模型判档路径：任意 OpenAI 兼容 `/v1/chat/completions`（memory-gateway / Ollama / vLLM 等）。
 /// `automation.mode = local-fallback` 时完全不调用；失败自动回退本地并告警。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub endpoint: String,
-    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub api_key: String,
@@ -151,8 +134,8 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            endpoint: String::new(),
-            model: String::new(),
+            endpoint: "http://127.0.0.1:8125/v1/chat/completions".into(),
+            model: "qwen3:8b".into(),
             api_key: String::new(),
             timeout_secs: default_llm_timeout(),
         }
@@ -205,7 +188,7 @@ impl Default for ExtensionConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateConfig {
     pub enabled: bool,
-    /// update.json 地址（公网 HTTPS 或对象存储均可）
+    /// update.json 地址（本机 HTTP 通道或对象存储均可）
     pub endpoint: String,
     pub check_on_start: bool,
 }
@@ -214,9 +197,7 @@ impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            endpoint:
-                "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
-                    .into(),
+            endpoint: "http://127.0.0.1:17651/update.json".into(),
             check_on_start: true,
         }
     }
@@ -248,135 +229,252 @@ impl Default for SelectionConfig {
     }
 }
 
-/// 用户配置目录下的 config.toml（按平台约定）
-pub fn user_config_path() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let path = {
-        let base = std::env::var_os("APPDATA")?;
-        PathBuf::from(base)
-            .join("com.memtools.desktop")
-            .join("config.toml")
-    };
-    #[cfg(target_os = "macos")]
-    let path = {
-        let home = std::env::var_os("HOME")?;
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("com.memtools.desktop")
-            .join("config.toml")
-    };
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let path = {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        base.join("com.memtools.desktop").join("config.toml")
-    };
-    Some(path)
+/// 内容梳理（P10 层次一）：直接调用 LLM 把内容总结 / 结构化 / 起标题 / 翻译 / 提取 / 润色。
+///
+/// 与 `[automation.llm]` 相互独立：判档走 automation，梳理走 processor。
+/// `prompts` 为空时使用内置模板；可在 config.toml 里逐条覆盖。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProcessorConfig {
+    /// 是否启用梳理（关闭时 /process 直接 503，不调用模型）
+    pub enabled: bool,
+    /// 任意 OpenAI 兼容 `/v1/chat/completions`（memory-gateway / Ollama / vLLM）
+    pub endpoint: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_processor_timeout")]
+    pub timeout_secs: u64,
+    /// 送入模型的内容上限（超长直接拒绝，避免误粘整篇文档）
+    #[serde(default = "default_processor_max_chars")]
+    pub max_chars: usize,
+    /// 各任务的 prompt 模板（空 = 用内置默认）；`{content}` / `{lang}` 会被替换
+    #[serde(default)]
+    pub prompts: ProcessorPrompts,
+    /// 层次二：agent 服务地址（opencode 的 `--attach`，如 http://127.0.0.1:4096）。
+    /// 留空 = 只看 `[processor.agent] enabled`；非空 = 直接用 agent，忽略 enabled。
+    #[serde(default)]
+    pub agent_endpoint: String,
+    /// 层次二：agent headless 调用配置（opencode / Qoder）
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
-/// 首次运行时把内置模板写到用户配置目录（exe 旁或用户目录已有配置则不动）
-pub fn ensure_user_config() {
-    let Some(user) = user_config_path() else {
-        return;
-    };
-    if user.is_file() {
-        return;
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if dir.join("config.toml").is_file() {
-                return;
-            }
+fn default_processor_timeout() -> u64 {
+    120
+}
+fn default_processor_max_chars() -> usize {
+    8000
+}
+
+impl Default for ProcessorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: "http://127.0.0.1:8125/v1/chat/completions".into(),
+            model: "qwen3:8b".into(),
+            api_key: String::new(),
+            timeout_secs: default_processor_timeout(),
+            max_chars: default_processor_max_chars(),
+            prompts: ProcessorPrompts::default(),
+            agent_endpoint: String::new(),
+            agent: AgentConfig::default(),
         }
     }
-    if let Some(dir) = user.parent() {
-        let _ = std::fs::create_dir_all(dir);
+}
+
+impl ProcessorConfig {
+    /// 是否走 agent（层次二）：`agent_endpoint` 非空或 `[processor.agent] enabled = true`
+    pub fn agent_enabled(&self) -> bool {
+        !self.agent_endpoint.trim().is_empty() || self.agent.enabled
     }
-    match std::fs::write(&user, include_str!("../config.toml")) {
-        Ok(_) => eprintln!("[memTools] 已生成用户配置：{}", user.display()),
-        Err(e) => eprintln!("[memTools] 写入用户配置失败（{}）：{e}", user.display()),
+
+    /// 当前梳理来源：`"llm"` 或 agent 的 kind（`opencode` / `qoder`）
+    pub fn source(&self) -> &str {
+        if self.agent_enabled() {
+            let kind = self.agent.kind.trim();
+            if kind.is_empty() {
+                "opencode"
+            } else {
+                kind
+            }
+        } else {
+            "llm"
+        }
+    }
+
+    /// 复用 `llm.rs` 的 OpenAI 兼容调用（把 processor 配置映射成 LlmConfig）
+    pub fn as_llm(&self) -> LlmConfig {
+        LlmConfig {
+            enabled: self.enabled,
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            api_key: self.api_key.clone(),
+            timeout_secs: self.timeout_secs,
+        }
+    }
+}
+
+/// 层次二：agent headless 调用配置（opencode / Qoder）。
+///
+/// memTools 通过**子进程直调 agent CLI**（不经 shell 拼接，避免注入），
+/// 让一个真实 agent（带工具/skill）来梳理内容，再落库。
+/// 层次一（直调 LLM）由 `[processor] endpoint` 提供，两者按 `enabled` 二选一。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// 是否启用 agent 路径（`[processor] agent_endpoint` 非空时同样启用）
+    pub enabled: bool,
+    /// `opencode` | `qoder`
+    pub kind: String,
+    /// 可执行文件路径；留空自动探测（PATH / 已知安装位置）
+    pub bin: String,
+    /// 模型：opencode 用 `provider/model`；qoder 用 auto/efficient/qmodel 等档位
+    pub model: String,
+    /// opencode 的 `--agent`（用自定义 agent 限定工具/权限）
+    pub agent: String,
+    /// 单次调用超时（秒）；agent 冷启动比直连 LLM 慢
+    pub timeout_secs: u64,
+    /// 工作目录；留空用 `{temp}/memtools-agent`，避免污染当前项目与会话历史
+    pub workdir: String,
+    /// 是否 `--pure`（opencode：跳过外部插件，防止 hook 拖慢/额外写记忆）
+    pub pure: bool,
+    /// qoder 的 `--max-turns`（0 = 不传）
+    pub max_turns: u32,
+    /// qoder 的 `--allowed-tools`（逗号分隔；留空不传）
+    pub allowed_tools: String,
+    /// qoder 的 `--disallowed-tools`（逗号分隔；留空不传）
+    pub disallowed_tools: String,
+    /// 追加参数（原样传给 CLI）
+    pub extra_args: Vec<String>,
+    /// 令牌：非空则注入到 `token_env` 指定的环境变量（不落日志）
+    pub token: String,
+    /// 令牌环境变量名；留空按 kind 取默认（qoder → QODER_PERSONAL_ACCESS_TOKEN）
+    pub token_env: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kind: "opencode".into(),
+            bin: String::new(),
+            model: String::new(),
+            agent: String::new(),
+            timeout_secs: 240,
+            workdir: String::new(),
+            pure: true,
+            max_turns: 0,
+            allowed_tools: String::new(),
+            disallowed_tools: String::new(),
+            extra_args: Vec::new(),
+            token: String::new(),
+            token_env: String::new(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// 令牌注入的目标环境变量名（默认值按 kind）
+    pub fn token_env_name(&self) -> String {
+        let custom = self.token_env.trim();
+        if !custom.is_empty() {
+            return custom.to_string();
+        }
+        match self.kind.trim().to_lowercase().as_str() {
+            "qoder" => "QODER_PERSONAL_ACCESS_TOKEN".into(),
+            _ => "OPENCODE_API_KEY".into(),
+        }
+    }
+}
+
+/// 内置 prompt 模板：`{content}` 必填，`{lang}` 仅翻译用
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProcessorPrompts {
+    pub summarize: String,
+    pub structure: String,
+    pub title: String,
+    pub translate: String,
+    pub extract: String,
+    pub polish: String,
+}
+
+impl Default for ProcessorPrompts {
+    fn default() -> Self {
+        Self {
+            summarize: "你是记忆整理助手。分析下面的内容，总结成一条可长期保存的记忆条目：\n\
+1. 用【前因】【行为】【后果】三标分段（某段缺失可省略）；\n\
+2. 保留关键事实、实体、日期、结论与可复用步骤；\n\
+3. 去掉广告、导航、客套等噪音，不编造原文没有的信息；\n\
+4. 语言简洁，总长不超过 400 字。\n\
+只输出整理后的正文。\n\n内容：\n{content}"
+                .into(),
+            structure: "你是记忆整理助手。把下面的内容结构化，用【前因】【行为】【后果】三标分段；\n\
+只调整结构，不增删事实、不编造信息；原文已有标记则保留并整理。\n\
+只输出整理后的正文。\n\n内容：\n{content}"
+                .into(),
+            title: "你是记忆标题助手。为下面的内容起一个 12-24 字的事件事实标题，以「做了什么」为主；\n\
+禁止只写主题分类名，禁止日期前缀，不要解释。\n只输出标题本身。\n\n内容：\n{content}"
+                .into(),
+            translate: "你是翻译助手。把下面的内容翻译成{lang}，保持事实、数字、专有名词准确，不增删信息。\n\
+只输出译文。\n\n内容：\n{content}"
+                .into(),
+            extract: "你是记忆整理助手。提取下面内容的要点，用简洁条目列表（每条一行，以 - 开头），\n\
+保留关键事实、数字、实体与结论，不编造。\n只输出要点列表。\n\n内容：\n{content}"
+                .into(),
+            polish: "你是文字润色助手。润色下面的内容，修正错别字与病句、让表达更清晰，\n\
+但不改变事实与含义、不加新信息。\n只输出润色后的正文。\n\n内容：\n{content}"
+                .into(),
+        }
+    }
+}
+
+impl ProcessorPrompts {
+    /// 取某任务的模板（空则回退内置默认）；未知任务返回空串
+    pub fn get(&self, task: &str) -> String {
+        let d = ProcessorPrompts::default();
+        let raw = match task {
+            "summarize" => pick(&self.summarize, &d.summarize),
+            "structure" => pick(&self.structure, &d.structure),
+            "title" => pick(&self.title, &d.title),
+            "translate" => pick(&self.translate, &d.translate),
+            "extract" => pick(&self.extract, &d.extract),
+            "polish" => pick(&self.polish, &d.polish),
+            _ => return String::new(),
+        };
+        raw.to_string()
+    }
+}
+
+/// 模板为空时回退默认（避免未知任务导致递归）
+fn pick<'a>(custom: &'a str, default: &'a str) -> &'a str {
+    if custom.trim().is_empty() {
+        default
+    } else {
+        custom
     }
 }
 
 impl AppConfig {
-    /// 按查找顺序加载第一个存在的配置文件；全部缺失/解析失败时用内置默认值。
+    /// `config.toml` 的固定路径（编译期 `CARGO_MANIFEST_DIR`，换目录放 exe 仍读这里）
+    pub fn path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml")
+    }
+
+    /// 从 src-tauri/config.toml 加载；失败时返回内置默认值
     pub fn load() -> Self {
-        let Some(path) = Self::candidate_paths().into_iter().find(|p| p.is_file()) else {
-            eprintln!("[memTools] 未找到 config.toml，使用内置默认配置");
-            return Self::parse_embedded();
-        };
+        let path = Self::path();
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<AppConfig>(&text) {
-                Ok(cfg) => {
-                    eprintln!("[memTools] 使用配置文件：{}", path.display());
-                    cfg.normalized()
-                }
+                Ok(cfg) => cfg,
                 Err(e) => {
-                    eprintln!(
-                        "[memTools] 配置文件解析失败（{}）：{e}，使用内置默认配置",
-                        path.display()
-                    );
-                    Self::parse_embedded()
+                    eprintln!("[memTools] config.toml 解析失败，使用默认配置: {e}");
+                    Self::default_config()
                 }
             },
-            Err(e) => {
-                eprintln!(
-                    "[memTools] 读取配置文件失败（{}）：{e}，使用内置默认配置",
-                    path.display()
-                );
-                Self::parse_embedded()
-            }
+            Err(_) => Self::default_config(),
         }
-    }
-
-    fn candidate_paths() -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        if let Some(p) = std::env::var_os("MEMTOOLS_CONFIG") {
-            if !p.is_empty() {
-                out.push(PathBuf::from(p));
-            }
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                out.push(dir.join("config.toml"));
-            }
-        }
-        // 开发构建优先读源码目录，避免首次运行生成的用户配置盖住正在编辑的模板
-        #[cfg(debug_assertions)]
-        out.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml"));
-        if let Some(p) = user_config_path() {
-            out.push(p);
-        }
-        out
-    }
-
-    fn parse_embedded() -> Self {
-        match toml::from_str::<AppConfig>(include_str!("../config.toml")) {
-            Ok(cfg) => cfg.normalized(),
-            Err(e) => {
-                eprintln!("[memTools] 内置默认配置解析失败：{e}，使用代码默认值");
-                Self::default_config()
-            }
-        }
-    }
-
-    /// 兼容旧配置：memory-gateway 已弃用，等价于 llm
-    fn normalized(mut self) -> Self {
-        if self
-            .automation
-            .mode
-            .trim()
-            .eq_ignore_ascii_case("memory-gateway")
-        {
-            eprintln!(
-                "[memTools] automation.mode=memory-gateway 已弃用，按 llm 处理；请改用 local-fallback | high-quality | llm"
-            );
-            self.automation.mode = "llm".into();
-        }
-        self
     }
 
     fn default_config() -> Self {
@@ -396,7 +494,6 @@ impl AppConfig {
             rsrs: RsrsConfig {
                 base_url: "http://127.0.0.1:15169".into(),
                 mcp_path: "mcp".into(),
-                auth_token: String::new(),
                 timeout_secs: 5,
                 op_timeout_secs: 30,
                 tools: RsrsToolNames {
@@ -425,6 +522,7 @@ impl AppConfig {
             update: UpdateConfig::default(),
             selection: SelectionConfig::default(),
             reminder: ReminderConfig::default(),
+            processor: ProcessorConfig::default(),
         }
     }
 }

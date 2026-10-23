@@ -33,9 +33,13 @@
         border-radius: 12px;
         padding: 16px;
       }
+      .card + .card { margin-top: 16px; }
+      .card h2 { font-size: 14px; margin: 0 0 4px; }
+      .card .hint { color: var(--dim); font-size: 12px; margin: 0 0 12px; }
       label { display: block; margin-bottom: 14px; }
       label span { display: block; color: var(--dim); margin-bottom: 6px; }
-      input {
+      input,
+      select {
         width: 100%;
         padding: 8px 10px;
         border-radius: 8px;
@@ -44,7 +48,10 @@
         color: var(--text);
         font: inherit;
       }
-      input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+      input:focus,
+      select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+      select:disabled,
+      input:disabled { opacity: 0.55; cursor: not-allowed; }
       .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
       button {
         padding: 8px 16px;
@@ -57,9 +64,14 @@
       }
       button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
       button:hover { filter: brightness(1.12); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      button.small { padding: 4px 9px; font-size: 12px; line-height: 1.4; }
       #status { margin-top: 14px; min-height: 22px; }
       #status.ok { color: var(--ok); }
       #status.err { color: var(--err); }
+      #targets-status { margin-top: 12px; min-height: 22px; }
+      #targets-status.ok { color: var(--ok); }
+      #targets-status.err { color: var(--err); }
       code {
         background: #0d1018;
         border: 1px solid var(--border);
@@ -71,6 +83,32 @@
       }
       ol { color: var(--dim); padding-left: 20px; margin: 10px 0 0; }
       ol li { margin: 4px 0; }
+      .target-row {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #131722;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .target-row .head { display: flex; gap: 8px; align-items: center; }
+      .target-row .idx {
+        width: 20px;
+        flex: 0 0 20px;
+        text-align: center;
+        color: var(--dim);
+        font-variant-numeric: tabular-nums;
+      }
+      .target-row .head input { flex: 1 1 auto; min-width: 0; }
+      .target-row .fields {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 10px;
+        margin-top: 8px;
+      }
+      .target-row label { margin-bottom: 0; }
+      .target-row .t-tree-only { display: none; }
+      .target-row.is-tree .t-tree-only { display: block; }
+      .empty { color: var(--dim); font-size: 13px; padding: 8px 0; }
     </style>
   </head>
   <body>
@@ -90,8 +128,24 @@
         <div class="row">
           <button id="save" class="primary">保存</button>
           <button id="test">测试连接</button>
+          <button id="open-memtools">打开 memTools</button>
         </div>
         <div id="status"></div>
+      </div>
+
+      <div class="card" id="targets-card">
+        <h2>快捷目标</h2>
+        <p class="hint">
+          第 1 个 = 最优先。右键菜单与桌面划词面板共用这份列表（数据存在 memTools 侧，本页只是编辑器）。
+        </p>
+        <div id="targets-list"></div>
+        <div class="row" style="margin-top: 10px">
+          <button id="add-target">新增目标</button>
+          <button id="reset-targets">恢复默认</button>
+          <button id="save-targets" class="primary">保存目标</button>
+        </div>
+        <div id="targets-status"></div>
+        <datalist id="taxonomy-list"></datalist>
       </div>
 
       <ol>

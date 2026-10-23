@@ -1,17 +1,5 @@
 # ============================================================
-# memTools 配置（用户可改；也是首次运行时写入用户目录的模板）
-#
-# 查找顺序（第一个存在的文件生效）：
-#   1. 环境变量 MEMTOOLS_CONFIG 指向的文件（绝对路径）
-#   2. 可执行文件同目录的 config.toml（绿色便携）
-#   3. 用户配置目录：
-#        Windows  %APPDATA%\com.memtools.desktop\config.toml
-#        macOS    ~/Library/Application Support/com.memtools.desktop/config.toml
-#        Linux    $XDG_CONFIG_HOME/com.memtools.desktop/config.toml
-#                 （未设置时为 ~/.config/com.memtools.desktop/config.toml）
-#   4. 仅开发构建回退到源码目录的 config.toml
-#   5. 以上都没有时使用编译进程序的内置默认值
-#
+# memTools 配置（用户可改）
 # 红线：不得启停 rsrs 服务、不得使用 --direct、不得 shell 拼接调用
 # ============================================================
 
@@ -36,10 +24,6 @@ submit_close = true        # 提交成功后短暂回显并自动关闭
 base_url = "http://127.0.0.1:15169"
 # MCP over HTTP 端点：POST {base_url}/{mcp_path}（JSON-RPC 2.0）
 mcp_path = "mcp"
-# 可选鉴权令牌：仅在 rsrs runtime 要求鉴权时填写。
-# 非空时请求会带 Authorization: Bearer <token>；也可用 RSRS_TOKEN /
-# RSRS_AUTH_TOKEN 环境变量覆盖（环境变量优先）。
-auth_token = ""
 # 快速探测超时（status/taxonomy）
 timeout_secs = 5
 # 慢操作超时（remember/recall/update/attach/show/tree）
@@ -62,21 +46,20 @@ query_log_mark = "memory_query_log_mark"
 # ---- 自动化（P2 已开放）----
 [automation]
 enabled = false
-# local-fallback | high-quality | llm
-mode = "local-fallback"
+mode = "local-fallback"    # high-quality | memory-gateway | local-fallback
 recall_rounds = 2          # 判重轮数
 recall_limit = 3           # 每轮候选上限
 dup_threshold = 0.85       # 相似度 >= 此值视为疑似重复 → 需用户确认（改/并）
 attach_threshold = 0.70    # 相似度 >= 此值视为同题 → 自动挂其下
 
 # ---- 模型判档 / 判树（P2 模型路径）----
-# 任意 OpenAI 兼容 /v1/chat/completions 端点，留空则不用（自动回退本地判档）。
-# mode = "local-fallback" 时完全不调用；mode = "high-quality" 或 "llm" 时启用。
+# 任意 OpenAI 兼容端点：memory-gateway（默认 :8125）、Ollama、vLLM 等。
+# mode = "local-fallback" 时完全不调用；mode = "high-quality" 或 "memory-gateway" 时启用。
 # 调用失败会自动回退本地判档/判树，并在结果里给出告警（不静默）。
 [automation.llm]
 enabled = false
-endpoint = ""
-model = ""
+endpoint = "http://127.0.0.1:8125/v1/chat/completions"
+model = "qwen3:8b"
 api_key = ""              # 留空则不发 Authorization 头
 timeout_secs = 60
 
@@ -99,18 +82,18 @@ token = ""
 
 # ---- 自动更新（P7）----
 # 客户端 GET endpoint 取 update.json，比版本 → 下载 exe → SHA-256 校验 →
-# 由新 exe 以 --apply-update 等待旧进程退出后自替换并重启（仅 Windows）。
-# 默认指向公开 GitHub Releases 的最新清单；自建分发可改为任意 HTTPS 地址。
+# 由新 exe 以 --apply-update 等待旧进程退出后自替换并重启。
+# 本机演示：node devtools/update-server.mjs（默认 127.0.0.1:17651）
+# 公网分发：把 update.json 与 exe 放到 Gitee / 对象存储，改这里的 endpoint 即可。
 [update]
 enabled = true
-endpoint = "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+endpoint = "http://127.0.0.1:17651/update.json"
 check_on_start = true
 
-# ---- 全局划词悬浮（P8，仅 Windows）----
+# ---- 全局划词悬浮（P8）----
 # 安装 WH_MOUSE_LL 低级鼠标钩子：拖选 / 双击选词后模拟 Ctrl+C 取词，
 # 在光标右下弹出小图标；点图标询问「存为日记 / 在 memTools 中编辑」。
 # 托盘右键「划词悬浮」可随时开关（此处只决定启动时的初始状态）。
-# 非 Windows 平台会禁用该功能（托盘项置灰），其余功能不受影响。
 # 取词会短暂占用剪贴板，完成后还原原来的文本剪贴板。
 [selection]
 enabled = true
@@ -120,3 +103,51 @@ drag_threshold_px = 8     # 拖选判定：按下到抬起的位移阈值（物�
 capture_timeout_ms = 600  # 模拟 Ctrl+C 后等待剪贴板更新的上限
 double_click = true       # 双击选词也弹图标
 offset_px = 14            # 图标相对光标的偏移
+
+# ---- 内容梳理（P10）----
+# 两条路径，按下面两个开关择一（agent_endpoint 非空 或 agent.enabled = true → 走 agent）：
+#   层次一（默认）：直连任意 OpenAI 兼容端点（memory-gateway / Ollama / vLLM），最快最省。
+#   层次二：交给本机 agent 的 headless 入口（opencode / Qoder），适合需要 agent 工具/skill 的场景。
+# 关闭 enabled 时 /process 与「梳理后保存」直接 503，不调用模型也不调 agent。
+# 日常切换来源不用改这里：小窗点「梳理」→「来源」下拉（模型 / opencode / Qoder / 关闭），
+# 选择会存到 {app_config_dir}/processor.json 并立即生效；本文件只提供默认值与高级参数。
+[processor]
+enabled = true
+endpoint = "http://127.0.0.1:8125/v1/chat/completions"
+model = "qwen3:8b"
+api_key = ""              # 留空则不发 Authorization 头
+timeout_secs = 120        # 模型调用超时（梳理比判档慢，默认更宽）
+max_chars = 8000          # 送入模型的内容上限（超长直接拒绝）
+# 层次二：agent 服务地址。留空 = 只看 [processor.agent] enabled；
+# 非空 = 直接用 agent（opencode 会作为 --attach 目标，例如已 `opencode serve` 在 4096）。
+agent_endpoint = ""
+
+# ---- 层次二：agent headless 调用（opencode / Qoder）----
+# memTools 用「子进程 + 参数数组」直调 agent CLI，不拼 shell 字符串（防注入）。
+# 默认工作目录是 {系统临时目录}/memtools-agent，避免 agent 把 memTools 仓库当项目。
+[processor.agent]
+enabled = false          # 默认走层次一；小窗「来源」下拉选 opencode/Qoder 会自动启用（写入 processor.json）
+kind = "opencode"         # opencode | qoder
+bin = ""                  # 留空自动探测：PATH → 已知安装位置；也可填完整路径
+model = ""                # opencode: provider/model（如 opencode/big-pickle）；qoder: auto/efficient/qmodel…
+agent = ""                # opencode --agent（用自定义 agent 限定工具/权限，建议配一个纯文本 agent）
+timeout_secs = 240        # agent 冷启动慢，超时后杀进程并明确报错
+workdir = ""              # 留空 = {temp}/memtools-agent
+pure = true               # opencode --pure：跳过外部插件（避免 hook 拖慢/额外写记忆）
+max_turns = 0             # qoder --max-turns（0 = 不传；设 1 可减少工具循环）
+allowed_tools = ""        # qoder --allowed-tools（逗号分隔，留空不传）
+disallowed_tools = ""     # qoder --disallowed-tools（如 "Bash,Edit,Write"，留空不传）
+extra_args = []           # 追加参数（原样传给 CLI）
+token = ""                # 令牌（勿提交到公开仓库）；非空则注入到 token_env
+token_env = ""            # 令牌环境变量名，留空按 kind：qoder → QODER_PERSONAL_ACCESS_TOKEN
+# 说明：
+# - opencode 需先在 opencode.jsonc 配好 provider/model；`opencode run --format json` 输出事件流。
+# - Qoder 需先 `qodercli /login`（或设 QODER_PERSONAL_ACCESS_TOKEN）；
+#   其 CLI 通常位于 <Qoder 安装目录>/resources/app/resources/bin/x86_64_windows/qodercli.exe，
+#   不在 PATH 时把 bin 填成完整路径即可。
+# - 排查：curl -H "X-MemTools-Token: <token>" http://127.0.0.1:17650/agent
+
+# prompt 模板可逐条覆盖（留空 = 用内置默认）。支持 {content} 与 {lang} 占位符。
+# 示例：
+# [processor.prompts]
+# summarize = '''你的自定义总结 prompt，用 {content} 代表正文。'''

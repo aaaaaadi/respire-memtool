@@ -29,6 +29,7 @@
       <button class="view-tab" data-view="remind">
         提醒<i id="remind-badge" class="tab-badge hidden">0</i>
       </button>
+      <button class="view-tab" data-view="targets">快捷目标</button>
       <button class="view-tab" data-view="graph">图谱</button>
     </nav>
 
@@ -61,7 +62,26 @@
 
       <div class="input-meta">
         <span id="char-count">0 字</span>
+        <button id="process-btn" class="mini-btn process-btn" title="梳理内容（总结/结构化/起标题/翻译/提取/润色）">梳理</button>
         <span class="hint">Ctrl+Enter 提交 · Esc 关闭</span>
+      </div>
+
+      <!-- 梳理任务条（P10：层次一 LLM / 层次二 agent） -->
+      <div class="process-bar hidden" id="process-bar">
+        <!-- 来源切换（模型 / opencode / Qoder / 关闭）：点选即生效，不用改 config.toml -->
+        <div class="proc-source" id="proc-source">
+          <span class="proc-source-label">来源</span>
+          <div class="proc-source-opts" id="proc-source-opts"></div>
+          <span class="proc-source-hint" id="proc-source-hint"></span>
+        </div>
+        <div class="proc-tasks">
+          <button class="process-task" data-task="summarize">总结成记忆</button>
+          <button class="process-task" data-task="structure">结构化</button>
+          <button class="process-task" data-task="title">起标题</button>
+          <button class="process-task" data-task="translate">翻译</button>
+          <button class="process-task" data-task="extract">提取要点</button>
+          <button class="process-task" data-task="polish">润色</button>
+        </div>
       </div>
 
       <!-- task 类型：【触发】行（日期不猜，缺失时询问） -->
@@ -138,6 +158,21 @@
         <button id="remind-refresh" class="mini-btn">刷新</button>
       </div>
       <div class="remind-groups" id="remind-groups"></div>
+    </main>
+
+    <!-- 快捷目标：划词面板与网页插件共用的有序保存位置列表 -->
+    <main class="content hidden" id="view-targets">
+      <div class="targets-intro">
+        <span class="targets-hint">第 1 个 = 最优先。划词悬浮窗与网页插件共用这份列表。</span>
+        <span id="targets-status" class="browse-status"></span>
+      </div>
+      <div id="targets-list" class="targets-list"></div>
+      <datalist id="target-tree-list"></datalist>
+      <div class="targets-actions">
+        <button id="targets-add" class="mini-btn">新增目标</button>
+        <button id="targets-reset" class="mini-btn">恢复默认</button>
+        <button id="targets-save" class="mini-btn primary">保存</button>
+      </div>
     </main>
 
     <!-- 3D 图谱：demo6 风格的记忆点云 + 实时增量 -->
@@ -225,13 +260,6 @@
       <button id="update-btn" class="mini-btn update-btn" title="检查更新">更新</button>
       <button id="ext-btn" class="mini-btn ext-btn" title="浏览器扩展接入信息">扩展</button>
       <span id="sync-badge" class="sync-badge hidden" title="rsrs 同步状态"></span>
-      <span
-        id="index-badge"
-        class="index-badge hidden"
-        role="button"
-        tabindex="0"
-        title=""
-      ></span>
       <span id="runtime-dot" class="runtime-dot" title="rsrs runtime 状态"></span>
     </footer>
 
