@@ -1,6 +1,6 @@
 [package]
 name = "memtools"
-version = "0.5.1"
+version = "0.5.2"
 description = "memTools - rsrs 桌面快捷记忆小工具"
 authors = ["memTools"]
 edition = "2021"
