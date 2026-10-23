@@ -12,6 +12,36 @@ const MENU_SEP = "memtools:sep";
 const MENU_PROCESS = "memtools:process";
 const MENU_TARGET_PREFIX = "memtools:target:";
 
+const DEFAULTS = { port: 17650, token: "" };
+
+// 降级列表：memTools 不可达且本地无缓存时使用（权威数据在 memTools 侧）
+const FALLBACK_TARGETS = [
+  {
+    id: "journal",
+    label: "存为日记",
+    kind: "journal",
+    parent: null,
+    type: null,
+    importance: "trivial",
+  },
+  {
+    id: "auto",
+    label: "存到主区（自动判档）",
+    kind: "auto",
+    parent: null,
+    type: null,
+    importance: null,
+  },
+];
+
+const REFRESH_ALARM = "memtools-refresh";
+const REFRESH_MINUTES = 10;
+const AUTH_WARN_GAP_MS = 60000;
+
+let currentTargets = null;
+let lastAuthWarnAt = 0;
+let menuQueue = Promise.resolve();
+
 // 每次启动重建菜单，避免升级后残留旧项
 function buildMenus(targets) {
   return new Promise((resolve) => {
@@ -127,14 +157,6 @@ function notify(title, message) {
   );
 }
 
-<<<<<<< HEAD
-async function getSettings() {
-  const got = await chrome.storage.local.get(["port", "token"]);
-  return {
-    port: Number(got.port) || DEFAULTS.port,
-    token: typeof got.token === "string" ? got.token.trim() : "",
-  };
-}
 
 function normalizeTarget(raw) {
   const kind = ["journal", "tree", "auto"].includes(raw?.kind)
@@ -216,8 +238,6 @@ async function refreshTargets() {
   }
 }
 
-=======
->>>>>>> feat/chrome-extension-pairing
 // 优先用 scripting 取完整选区；受限页面回退到 info.selectionText
 async function readSelection(tabId, fallback) {
   if (!tabId) return fallback || "";

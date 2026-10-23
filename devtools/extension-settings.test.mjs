@@ -10,8 +10,9 @@ function extension(settings, pairing) {
   const context = vm.createContext({
     chrome: {
       contextMenus: { removeAll(cb) { cb(); }, create() {}, onClicked: event },
-      runtime: { onInstalled: { addListener(fn) { installed.push(fn); } }, onStartup: event, getURL: p => "chrome-extension://test/" + p },
+      runtime: { onInstalled: { addListener(fn) { installed.push(fn); } }, onStartup: event, onMessage: event, getURL: p => "chrome-extension://test/" + p },
       action: { onClicked: event },
+      alarms: { get(_name, cb) { cb({}); }, onAlarm: event },
       storage: { local: { async get() { return { ...store }; }, async set(v) { Object.assign(store, v); } } },
     },
     async fetch(url) {
