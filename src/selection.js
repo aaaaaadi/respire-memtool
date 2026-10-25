@@ -70,6 +70,11 @@ function setStatus(message, kind) {
   el.className = "status" + (text ? " show" : "") + (kind ? " " + kind : "");
 }
 
+/* 点击图标后的取词阶段（Rust 侧最多阻塞 capture_timeout_ms）：图标转圈，禁止重复点击 */
+function setReading(on) {
+  document.body.classList.toggle("reading", !!on);
+}
+
 function updateButtons() {
   const hasText = state.text.trim().length > 0;
   const journal = $("btn-journal");
@@ -175,6 +180,16 @@ function handleShow(event) {
   pulseOrb();
 }
 
+/* 剪贴板通道补到了文字（终端里应用自己复制的，或用户自己按了 Ctrl+C）：
+   只更新内容，不改变展开状态，也不打断当前交互 */
+function handleText(event) {
+  const payload = event && event.payload;
+  if (!payload) return;
+  state.pendingError = "";
+  applyPayload(payload);
+  if (!state.expanded) pulseOrb();
+}
+
 function handleHide() {
   state.epoch += 1;
   clearHideTimer();
@@ -195,11 +210,24 @@ async function onOrbClick() {
   }
 
   state.opening = true;
+  setReading(true);
   try {
     const epoch = state.epoch;
+    /* 文字未就位（普通窗口的图标只是入口）：此刻才取词，注入只发生这一次 */
     if (!state.text.trim()) {
       state.pendingError = await pullPayload(epoch);
       if (epoch !== state.epoch) return;
+
+      if (!state.text.trim()) {
+        /* 取不到内容就静默收起，不留空面板 */
+        try {
+          await call("selection_hide");
+        } catch (_) {
+          /* 隐藏失败无妨，下面照样收起 */
+        }
+        enterCollapsed();
+        return;
+      }
     }
 
     try {
@@ -215,10 +243,9 @@ async function onOrbClick() {
     if (state.pendingError) {
       setStatus(state.pendingError, "err");
       state.pendingError = "";
-    } else if (!state.text.trim()) {
-      setStatus("未获取到选中文字，请重新划词", "warn");
     }
   } finally {
+    setReading(false);
     state.opening = false;
   }
 }
@@ -374,6 +401,7 @@ async function init() {
 
   /* 先注册事件，再主动拉一次，防止事件早于监听 */
   await listenEvent("selection://show", handleShow);
+  await listenEvent("selection://text", handleText);
   await listenEvent("selection://hide", handleHide);
 
   const epoch = state.epoch;

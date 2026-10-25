@@ -19,7 +19,7 @@ memTools 是一个基于 Tauri 2 的桌面快捷记录工具：用全局热键�
 - **提醒**：扫描含【触发】日期的非日记条目，分为已逾期、今天到期、即将到期和之后；支持忽略与标记完成。
 - **3D 记忆图谱**：只读读取 rsrs 的 `onememory.db` 与 `core-index`，构建节点和边；支持聚焦层级、节点上限、大脑容器显示、实时增量刷新（900ms）。
 - **浏览器扩展**：MV3 扩展把网页选中文字通过本机端点保存为日记或自动记录，正文附带来源标题和 URL。
-- **划词悬浮**（仅 Windows）：拖选或双击选词后弹出小图标，可存为日记或带入主窗编辑。
+- **划词悬浮**（仅 Windows）：拖选或双击选词后先弹小图标，**此时不复制任何东西**；点图标才取词，可存为日记或带入主窗编辑。终端类窗口不注入取词，改为监听应用自身复制。过程中 `Ctrl+C` 的原有行为不受影响。
 - **同步状态**：底栏显示离线、待同步数量和冲突数量。
 - **自动更新**：从 GitHub Releases 读取清单，下载并校验 SHA-256 后在 Windows 上自替换重启。
 
@@ -161,15 +161,19 @@ debug 构建会在第 3 项之前额外读取源码目录的 `src-tauri/config.t
 
 ### 划词悬浮
 
+拖选或双击选词后只弹图标，不取词；点图标才模拟一次复制并读回文字（有修饰键按下时跳过，只释放自己按下的键，且仅在剪贴板仍是本次结果时才还原原内容）。终端类窗口与内嵌终端的宿主一律不注入，改由剪贴板监听唤出图标——往里注入 `Ctrl+C` 等于给 TUI 发 `0x03`，会中断甚至退出正在运行的程序。
+
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `selection.enabled` | `true` | 启动时是否开启；托盘菜单可随时切换 |
 | `selection.min_chars` | `2` | 少于该字数不弹图标 |
 | `selection.max_chars` | `4000` | 超过该字数忽略 |
 | `selection.drag_threshold_px` | `8` | 拖选判定的位移阈值（物理像素） |
-| `selection.capture_timeout_ms` | `600` | 模拟复制后等待剪贴板更新的上限 |
+| `selection.capture_timeout_ms` | `600` | 点击图标后等待剪贴板更新的上限 |
 | `selection.double_click` | `true` | 双击选词也弹图标 |
 | `selection.offset_px` | `14` | 图标相对光标的偏移 |
+| `selection.clipboard_arm_ms` | `1200` | 拖选后多久内的复制算本次划词（剪贴板归因窗口） |
+| `selection.no_inject_processes` | 见 `config.toml` | 不注入取词的进程名黑名单（内嵌终端的宿主只能按进程名区分） |
 
 ## 索引未就绪怎么办
 
@@ -256,7 +260,7 @@ npm run tauri build -- --no-bundle
 
 - 3D 图谱依赖 rsrs 内部的 SQLite 表和 `core-index` 布局，目前以 rsrs 1.0.x 验证；schema 变更可能导致图谱不可用。
 - runtime 不可达时不展示图谱，也不会猜测其他账号的数据库位置。
-- 全局划词悬浮仅支持 Windows；需要 `Ctrl+Shift+C` 复制的终端类应用可能取不到选中文字。
+- 全局划词悬浮仅支持 Windows。终端类窗口（Windows Terminal、conhost、mintty、wezterm、alacritty、PuTTY）与 `no_inject_processes` 里的进程不会自动取词：它们只在应用自身把选区复制进剪贴板后弹图标，所以 Windows Terminal 默认关闭“选中即复制”时，需要用户自己按一次复制键。VS Code 等内嵌终端的宿主窗口类与编辑器相同，只能按进程名排除。
 - 自动更新的下载与安装仅支持 Windows，其他平台需手动下载。
 - 没有账号切换器；切换账号需要调整 `rsrs.base_url` 或让目标账号占用同一端口。
 - 发布包未签名；macOS 构建仅覆盖 arm64。

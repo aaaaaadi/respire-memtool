@@ -637,11 +637,18 @@ fn quit_app(app: AppHandle) {
 // 全局划词悬浮（P8）
 // ---------------------------------------------------------------------------
 
+/// 读取划词结果；文字未就位时当场取词（点击图标才注入，最长阻塞约 capture_timeout_ms）
 #[tauri::command]
-fn selection_payload(
+async fn selection_payload(
     sel: tauri::State<'_, Arc<selection::SelectionState>>,
-) -> Option<selection::SelectionPayload> {
-    sel.payload()
+) -> Result<Option<selection::SelectionPayload>, String> {
+    let state = sel.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || selection::capture_on_click(&state))
+            .await
+            .ok()
+            .flatten(),
+    )
 }
 
 #[tauri::command]

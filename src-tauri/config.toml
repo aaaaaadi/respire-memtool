@@ -91,18 +91,29 @@ endpoint = "http://127.0.0.1:17651/update.json"
 check_on_start = true
 
 # ---- 全局划词悬浮（P8）----
-# 安装 WH_MOUSE_LL 低级鼠标钩子：拖选 / 双击选词后模拟 Ctrl+C 取词，
-# 在光标右下弹出小图标；点图标询问「存为日记 / 在 memTools 中编辑」。
+# 安装 WH_MOUSE_LL 低级鼠标钩子：拖选 / 双击选词后先在光标右下弹出小图标，
+# **此时不取词**；点图标才模拟一次 Ctrl+C 取词，再询问「存为日记 / 在 memTools 中编辑」。
+# 终端类窗口与内嵌终端的宿主（VS Code 等）一律不注入，改由剪贴板监听唤出图标 ——
+# 往里注入 Ctrl+C 等于给 TUI 发 0x03，会中断甚至退出正在跑的程序。
 # 托盘右键「划词悬浮」可随时开关（此处只决定启动时的初始状态）。
-# 取词会短暂占用剪贴板，完成后还原原来的文本剪贴板。
+# 取词会短暂占用剪贴板，仅在剪贴板仍是本次结果时才还原原来的文本剪贴板。
 [selection]
 enabled = true
 min_chars = 2             # 少于该字数不弹图标（避免误触）
 max_chars = 4000          # 超过则忽略（超长内容请到 memTools 分段记录）
 drag_threshold_px = 8     # 拖选判定：按下到抬起的位移阈值（物理像素）
-capture_timeout_ms = 600  # 模拟 Ctrl+C 后等待剪贴板更新的上限
+capture_timeout_ms = 600  # 点击图标后等待剪贴板更新的上限
 double_click = true       # 双击选词也弹图标
 offset_px = 14            # 图标相对光标的偏移
+clipboard_arm_ms = 1200   # 拖选后多久内的复制算本次划词（剪贴板归因窗口）
+# 不注入取词的进程名黑名单：这些窗口只监听剪贴板，不向它发任何键。
+# 主要针对内嵌终端的宿主（窗口类与普通编辑器相同，只能按进程名区分）。
+no_inject_processes = [
+  "Code.exe", "Code - Insiders.exe", "Cursor.exe", "Windsurf.exe", "Trae.exe", "Qoder.exe",
+  "WindowsTerminal.exe", "wt.exe", "OpenConsole.exe", "conhost.exe",
+  "wezterm-gui.exe", "alacritty.exe", "mintty.exe", "Hyper.exe", "Tabby.exe",
+  "FluentTerminal.exe", "ConEmu.exe", "ConEmu64.exe", "Terminus.exe",
+]
 
 # ---- 内容梳理（P10）----
 # 两条路径，按下面两个开关择一（agent_endpoint 非空 或 agent.enabled = true → 走 agent）：

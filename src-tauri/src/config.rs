@@ -213,6 +213,43 @@ pub struct SelectionConfig {
     pub capture_timeout_ms: u64,
     pub double_click: bool,
     pub offset_px: i32,
+    /// 剪贴板归因窗口：拖选后多久内的复制算本次划词（毫秒）
+    #[serde(default = "default_clipboard_arm_ms")]
+    pub clipboard_arm_ms: u64,
+    /// 不注入取词的进程名黑名单（内嵌终端的宿主如 VS Code，只能按进程名判）
+    #[serde(default = "default_no_inject_processes")]
+    pub no_inject_processes: Vec<String>,
+}
+
+fn default_clipboard_arm_ms() -> u64 {
+    1200
+}
+
+fn default_no_inject_processes() -> Vec<String> {
+    [
+        "Code.exe",
+        "Code - Insiders.exe",
+        "Cursor.exe",
+        "Windsurf.exe",
+        "Trae.exe",
+        "Qoder.exe",
+        "WindowsTerminal.exe",
+        "wt.exe",
+        "OpenConsole.exe",
+        "conhost.exe",
+        "wezterm-gui.exe",
+        "alacritty.exe",
+        "mintty.exe",
+        "Hyper.exe",
+        "Tabby.exe",
+        "FluentTerminal.exe",
+        "ConEmu.exe",
+        "ConEmu64.exe",
+        "Terminus.exe",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for SelectionConfig {
@@ -225,6 +262,8 @@ impl Default for SelectionConfig {
             capture_timeout_ms: 600,
             double_click: true,
             offset_px: 14,
+            clipboard_arm_ms: default_clipboard_arm_ms(),
+            no_inject_processes: default_no_inject_processes(),
         }
     }
 }

@@ -1,23 +1,30 @@
-﻿//! 全局划词 + 悬浮小按钮（P8，仿 STranslate）
+//! 全局划词 + 悬浮小按钮（P8，仿 STranslate）
 //!
-//! 流程：
+//! 流程（2026-10-25 改版：拖选不再取词，点击才取词）：
 //! 1. 专用线程装 `WH_MOUSE_LL` 低级鼠标钩子，回调只做轻量判定（不碰剪贴板/UI），
-//!    检测「拖选」与「双击选词」，命中后经 `mpsc` 投给取词线程；
-//! 2. 取词线程：跳过 memTools 自身前台窗口 → 等鼠标事件落地 → `SendInput` 模拟 Ctrl+C
-//!    → 按剪贴板序列号轮询 → `arboard` 读文本 → 还原原剪贴板文本；
-//! 3. 光标右下显示 `selector` 小窗（40×40，透明置顶），
-//!    用 `SetWindowPos(SWP_NOACTIVATE|SWP_SHOWWINDOW)` 定位，不抢焦点；
-//! 4. 点击悬浮窗外部由同一钩子判定并隐藏。
+//!    命中「拖选」与「双击选词」后经 `mpsc` 投给取词线程；判定要求按下与抬起在
+//!    同一窗口、且两点都落在该窗口客户区内（标题栏/边框拖动不算划词）；
+//! 2. 取词线程命中后**先不注入**，只把悬浮图标弹到光标旁；终端类窗口与黑名单进程
+//!    （VS Code 等内嵌终端的宿主）连图标都不弹，改为等应用自己复制；
+//! 3. 同一线程建 message-only 窗口挂 `AddClipboardFormatListener`：只认「刚拖选过的
+//!    那个前台窗口、在 `clipboard_arm_ms` 内」发生的剪贴板更新，作为取词来源——给终端
+//!    一条零注入通道，也让用户自己按 Ctrl+C 后不必再点图标（文字已就位，点击即展开）；
+//! 4. 用户点图标才真正取词：核对前台仍是来源窗口 → 按物理键状态决定发不发 Ctrl
+//!    （只在没按下时自己按下、只释放自己按过的键）→ 轮询剪贴板 → 比对序列号后才还原；
+//! 5. 光标右下显示 `selector` 小窗（40×40，透明置顶），
+//!    `SetWindowPos(SWP_NOACTIVATE|SWP_SHOWWINDOW)` 定位，不抢焦点。
 //!
 //! 红线：不启停 rsrs 服务；不 shell；不改动剪贴板以外的系统状态。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+
+use crate::config::SelectionConfig;
 
 /// 收起态图标窗口尺寸（物理像素）
 const ICON_W: i32 = 40;
@@ -30,6 +37,22 @@ const VK_C_KEY: u16 = 0x43;
 /// 双击判定：两次抬起间隔与位置容差
 const DOUBLE_CLICK_MS: u128 = 420;
 const CLICK_TOLERANCE_PX: i32 = 4;
+/// 剪贴板更新消息
+const WM_CLIPBOARDUPDATE: u32 = 0x031D;
+/// message-only 窗口类名
+const CLIP_CLASS: &str = "memToolsClipboardSink";
+
+/// 终端类窗口：往里注入 Ctrl+C 等于给 TUI 发 0x03，故一律不注入
+const TERMINAL_CLASSES: &[&str] = &[
+    "ConsoleWindowClass",
+    "CASCADIA_HOSTING_WINDOW_CLASS",
+    "mintty",
+    "org.wezfurlong.wezterm",
+    "wezterm",
+    "Alacritty",
+    "alacritty",
+    "PuTTY",
+];
 
 #[derive(Clone, Serialize)]
 pub struct SelectionPayload {
@@ -46,6 +69,8 @@ pub struct SelectionState {
     payload: Mutex<Option<SelectionPayload>>,
     /// 当前窗口矩形（物理像素，屏幕坐标）
     rect: Mutex<Option<(i32, i32, i32, i32)>>,
+    /// 本次悬浮的来源窗口（HWND 转 isize）与是否零注入通道
+    source: Mutex<Option<(isize, bool)>>,
 }
 
 impl SelectionState {
@@ -56,6 +81,7 @@ impl SelectionState {
             expanded: AtomicBool::new(false),
             payload: Mutex::new(None),
             rect: Mutex::new(None),
+            source: Mutex::new(None),
         }
     }
 
@@ -98,34 +124,131 @@ impl SelectionState {
             *slot = r;
         }
     }
+
+    fn source(&self) -> Option<(isize, bool)> {
+        self.source.lock().ok().and_then(|s| *s)
+    }
+
+    fn set_source(&self, s: Option<(isize, bool)>) {
+        if let Ok(mut slot) = self.source.lock() {
+            *slot = s;
+        }
+    }
 }
 
 enum Trigger {
-    /// 命中划词（拖选 / 双击）
-    Selection,
+    /// 命中划词（拖选 / 双击），带目标窗口 HWND（isize）
+    Selection(isize),
     /// 点击悬浮窗外部 → 隐藏
     Outside,
+    /// 剪贴板有新增（终端通道 / 用户自己复制）
+    Clipboard,
+}
+
+/// 按下起点（划词判定：位置、时间、窗口、是否客户区）
+#[derive(Clone, Copy)]
+struct DownInfo {
+    x: i32,
+    y: i32,
+    at: Instant,
+    hwnd: isize,
+    in_client: bool,
+}
+
+/// 刚发生的划选（剪贴板归因窗口）
+#[derive(Clone, Copy)]
+struct Arm {
+    hwnd: isize,
+    at: Instant,
 }
 
 static HOOK_STATE: OnceLock<Arc<SelectionState>> = OnceLock::new();
 static HOOK_TX: OnceLock<Sender<Trigger>> = OnceLock::new();
-static HOOK_CFG: OnceLock<crate::config::SelectionConfig> = OnceLock::new();
+static HOOK_CFG: OnceLock<SelectionConfig> = OnceLock::new();
 
-/// 按下起点（仅用于划词判定）
-static DOWN: Mutex<Option<(i32, i32, Instant)>> = Mutex::new(None);
+static DOWN: Mutex<Option<DownInfo>> = Mutex::new(None);
 /// 上一次「原地抬起」（用于双击判定）
 static LAST_CLICK: Mutex<Option<(i32, i32, Instant)>> = Mutex::new(None);
-
-use crate::config::SelectionConfig;
+/// 划选后的剪贴板归因窗口
+static ARM: Mutex<Option<Arm>> = Mutex::new(None);
+/// 最后一次由自己造成的剪贴板序列号（事件到达时据此忽略自家写入）
+static SELF_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 正在注入取词（期间的剪贴板事件一律忽略）
+static INJECTING: AtomicBool = AtomicBool::new(false);
 
 /// 拖选判定：位移达到阈值且不是长时间按住（避免拖窗口/拖滚动条误判为划词）
 fn drag_counts_as_selection(dist: i32, elapsed: Duration, threshold: i32) -> bool {
     dist >= threshold.max(1) && elapsed <= Duration::from_secs(10)
 }
 
+/// 终端类窗口判定（忽略大小写）
+fn is_terminal_class(class: &str) -> bool {
+    !class.is_empty() && TERMINAL_CLASSES.iter().any(|c| c.eq_ignore_ascii_case(class))
+}
+
+/// 取路径最后一段（`C:\...\Code.exe` → `Code.exe`），去掉可能的引号
+fn process_basename(path: &str) -> &str {
+    let trimmed = path.trim().trim_matches('"');
+    match trimmed.rsplit(|c| c == '\\' || c == '/').next() {
+        Some(name) if !name.is_empty() => name,
+        _ => trimmed,
+    }
+}
+
+/// 归因窗口是否已过期
+fn arm_expired(elapsed: Duration, arm_ms: u64) -> bool {
+    elapsed > Duration::from_millis(arm_ms.max(200))
+}
+
+/// 取词文本是否在 `[min_chars, max_chars]` 区间内
+fn accept_text(text: &str, min_chars: usize, max_chars: usize) -> Option<String> {
+    let trimmed = text.trim();
+    let chars = trimmed.chars().count();
+    if chars < min_chars.max(1) || chars > max_chars.max(1) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// 注入方案：按键守卫决定发哪些键
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyPlan {
+    /// 有其它修饰键按下 → 本次不取词
+    Skip,
+    /// 用户已按住 Ctrl → 只发 C 的按下/抬起，绝不碰 Ctrl
+    OnlyC,
+    /// 常规：Ctrl↓ C↓ C↑ Ctrl↑
+    FullCtrlC,
+}
+
+fn plan_for(ctrl_down: bool, other_modifier_down: bool) -> KeyPlan {
+    if other_modifier_down {
+        KeyPlan::Skip
+    } else if ctrl_down {
+        KeyPlan::OnlyC
+    } else {
+        KeyPlan::FullCtrlC
+    }
+}
+
 fn clear_down() {
     if let Ok(mut slot) = DOWN.lock() {
         *slot = None;
+    }
+}
+
+fn clear_arm() {
+    if let Ok(mut slot) = ARM.lock() {
+        *slot = None;
+    }
+}
+
+fn set_arm(hwnd: isize) {
+    if let Ok(mut slot) = ARM.lock() {
+        *slot = Some(Arm {
+            hwnd,
+            at: Instant::now(),
+        });
     }
 }
 
@@ -143,21 +266,30 @@ fn point_inside(rect: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
 #[cfg(windows)]
 mod windows_impl {
     use super::*;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
-    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::System::DataExchange::{
+        AddClipboardFormatListener, GetClipboardSequenceNumber,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
+        GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
+        VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
-        GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos,
-        SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, GWL_EXSTYLE,
+        CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
+        GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW,
+        GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, RegisterClassW,
+        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+        TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, HWND_MESSAGE,
         HWND_TOPMOST, MSLLHOOKSTRUCT, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WH_MOUSE_LL,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
     use arboard;
 
@@ -189,6 +321,13 @@ mod windows_impl {
                     );
                     return;
                 }
+                // 剪贴板监听与本线程共用同一消息循环（取词线程只做重活）
+                if !install_clipboard_listener() {
+                    eprintln!(
+                        "[memTools] 剪贴板监听安装失败：{}",
+                        std::io::Error::last_os_error()
+                    );
+                }
                 let mut msg: MSG = std::mem::zeroed();
                 // GetMessageW 返回 0 表示 WM_QUIT，-1 表示错误
                 while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -197,6 +336,57 @@ mod windows_impl {
                 }
                 UnhookWindowsHookEx(hook);
             });
+    }
+
+    /// message-only 窗口 + `AddClipboardFormatListener`
+    fn install_clipboard_listener() -> bool {
+        unsafe {
+            let hinst = GetModuleHandleW(std::ptr::null());
+            let class: Vec<u16> = CLIP_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
+            let title: Vec<u16> = "memTools clipboard".encode_utf16().chain(std::iter::once(0)).collect();
+
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(clip_proc);
+            wc.hInstance = hinst;
+            wc.lpszClassName = class.as_ptr();
+            if RegisterClassW(&wc) == 0 {
+                // 1410 = 类已存在，重装/热重启时会出现，忽略
+                if std::io::Error::last_os_error().raw_os_error() != Some(1410) {
+                    return false;
+                }
+            }
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                hinst,
+                std::ptr::null(),
+            );
+            if hwnd.is_null() {
+                return false;
+            }
+            AddClipboardFormatListener(hwnd) != 0
+        }
+    }
+
+    unsafe extern "system" fn clip_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_CLIPBOARDUPDATE {
+            post(Trigger::Clipboard);
+            return 0;
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
     unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -228,21 +418,44 @@ mod windows_impl {
             clear_down();
             return;
         }
+        // 用光标下的顶层窗口判断，而不是 GetForegroundWindow：首次点在非活动窗口时，
+        // 钩子先于激活触发，前台还停在旧窗口上
+        let hwnd = root_window_at(pt);
+        if hwnd.is_null() {
+            clear_down();
+            return;
+        }
+        let in_client = client_area_contains(hwnd, pt);
         if let Ok(mut slot) = DOWN.lock() {
-            *slot = Some((pt.x, pt.y, Instant::now()));
+            *slot = Some(DownInfo {
+                x: pt.x,
+                y: pt.y,
+                at: Instant::now(),
+                hwnd: hwnd as isize,
+                in_client,
+            });
         }
     }
 
     fn on_button_up(state: &SelectionState, cfg: &SelectionConfig, pt: POINT) {
         let down = DOWN.lock().ok().and_then(|mut d| d.take());
-        let Some((x0, y0, t0)) = down else {
+        let Some(down) = down else {
             return;
         };
         if !state.is_enabled() {
             return;
         }
-        let dist = (pt.x - x0).abs().max((pt.y - y0).abs());
-        let elapsed = t0.elapsed();
+        // 按下与抬起必须在同一窗口，且都在客户区内（标题栏/边框/移出窗口不算划词）
+        let hwnd = root_window_at(pt);
+        if hwnd.is_null() || hwnd as isize != down.hwnd {
+            return;
+        }
+        if !down.in_client || !client_area_contains(hwnd, pt) {
+            return;
+        }
+        let dist = (pt.x - down.x).abs().max((pt.y - down.y).abs());
+        let elapsed = down.at.elapsed();
+
 
         // 原地点击：可能是双击选词
         if dist <= CLICK_TOLERANCE_PX {
@@ -260,13 +473,13 @@ mod windows_impl {
                 *last = Some((pt.x, pt.y, Instant::now()));
             }
             if cfg.double_click && double {
-                post(Trigger::Selection);
+                post(Trigger::Selection(hwnd as isize));
             }
             return;
         }
 
         if drag_counts_as_selection(dist, elapsed, cfg.drag_threshold_px) {
-            post(Trigger::Selection);
+            post(Trigger::Selection(hwnd as isize));
         }
     }
 
@@ -282,69 +495,179 @@ mod windows_impl {
                 while let Ok(trigger) = rx.recv() {
                     match trigger {
                         Trigger::Outside => hide_selector(&app, &state),
-                        Trigger::Selection => {
-                            if !state.is_enabled() {
-                                continue;
-                            }
-                            if state.is_visible() {
-                                hide_selector(&app, &state);
-                            }
-                            if let Some(payload) = grab_selection(&cfg) {
-                                show_selector(&app, &state, payload);
-                            }
-                        }
+                        Trigger::Selection(hwnd) => on_selection(&app, &cfg, &state, hwnd),
+                        Trigger::Clipboard => on_clipboard(&app, &cfg, &state),
                     }
                 }
             });
     }
 
-    /// 取词：跳过自身前台窗口 → 等鼠标事件落地 → 模拟 Ctrl+C → 读剪贴板 → 还原
-    fn grab_selection(cfg: &SelectionConfig) -> Option<SelectionPayload> {
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.is_null() {
-            return None;
+    /// 命中划选：只弹图标，不取词（终端/黑名单连图标都不弹，等剪贴板事件）
+    fn on_selection(app: &AppHandle, cfg: &SelectionConfig, state: &SelectionState, raw: isize) {
+        // 用拖选命中的真实窗口，不用 GetForegroundWindow：有些窗口不激活（或拖选发生在非活动窗口）时前台会指向别处
+        let hwnd = raw as HWND;
+        if hwnd.is_null() || pid_of(hwnd) == unsafe { GetCurrentProcessId() } {
+            return;
         }
-        let mut pid: u32 = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        if pid == unsafe { GetCurrentProcessId() } {
-            return None;
+        let no_inject = is_no_inject(hwnd, cfg);
+        if state.is_visible() {
+            hide_selector(app, state);
         }
-        let source = window_title(hwnd);
-
-        // 给来源应用一点时间处理 mouse-up（拖选结束时选区才稳定）
-        std::thread::sleep(Duration::from_millis(80));
-        // 期间用户已切换窗口则放弃
-        if unsafe { GetForegroundWindow() } != hwnd {
-            return None;
+        set_arm(hwnd as isize);
+        if no_inject {
+            // 终端与内嵌终端宿主：绝不注入，等应用自己复制后由剪贴板事件唤出
+            return;
         }
-
-        let text = capture_selected_text(Duration::from_millis(cfg.capture_timeout_ms.max(50)))?;
-        let trimmed = text.trim();
-        let chars = trimmed.chars().count();
-        if chars < cfg.min_chars.max(1) || chars > cfg.max_chars.max(1) {
-            return None;
-        }
-        Some(SelectionPayload {
-            text: trimmed.to_string(),
-            source,
-        })
+        let payload = SelectionPayload {
+            text: String::new(),
+            source: window_title(hwnd),
+        };
+        show_selector(app, state, payload, hwnd, false);
     }
 
-    /// 模拟 Ctrl+C 并读回选中文本；完成后还原此前的剪贴板文本。
-    fn capture_selected_text(timeout: Duration) -> Option<String> {
+    /// 剪贴板有新增：只认「刚拖选过的那个前台窗口」在归因窗口内的更新
+    fn on_clipboard(app: &AppHandle, cfg: &SelectionConfig, state: &SelectionState) {
+        if !state.is_enabled() || INJECTING.load(Ordering::SeqCst) {
+            return;
+        }
+        let seq = unsafe { GetClipboardSequenceNumber() };
+        if seq == 0 || seq <= SELF_SEQ.load(Ordering::SeqCst) {
+            return;
+        }
+        let arm = ARM.lock().ok().and_then(|mut a| a.take());
+        let Some(arm) = arm else {
+            return;
+        };
+        if arm_expired(arm.at.elapsed(), cfg.clipboard_arm_ms) {
+            return;
+        }
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() || hwnd as isize != arm.hwnd || pid_of(hwnd) == unsafe { GetCurrentProcessId() } {
+            return;
+        }
+        // 给来源应用一点时间把剪贴板写完
+        std::thread::sleep(Duration::from_millis(40));
+        let Some(text) = read_clipboard_text() else {
+            return;
+        };
+        let Some(text) = accept_text(&text, cfg.min_chars, cfg.max_chars) else {
+            return;
+        };
+        let payload = SelectionPayload {
+            text,
+            source: window_title(hwnd),
+        };
+        if state.is_visible() {
+            // 普通窗口已弹图标：补全文字，点击时无需再注入
+            state.set_payload(Some(payload.clone()));
+            if let Some(win) = app.get_webview_window("selector") {
+                let _ = win.emit("selection://text", payload);
+            }
+        } else {
+            show_selector(app, state, payload, hwnd, false);
+        }
+        SELF_SEQ.store(unsafe { GetClipboardSequenceNumber() }, Ordering::SeqCst);
+        clear_arm();
+    }
+
+    /// 写剪贴板的文本（只读，不改动用户内容）
+    fn read_clipboard_text() -> Option<String> {
+        let mut clipboard = arboard::Clipboard::new().ok()?;
+        clipboard.get_text().ok()
+    }
+
+    /// 窗口是否终端类，或进程名落在黑名单里（内嵌终端的宿主只能按进程名判）
+    fn is_no_inject(hwnd: HWND, cfg: &SelectionConfig) -> bool {
+        if is_terminal_class(&window_class(hwnd)) {
+            return true;
+        }
+        let pid = pid_of(hwnd);
+        if pid == 0 {
+            return false;
+        }
+        let exe = process_name(pid);
+        if exe.is_empty() {
+            return false;
+        }
+        cfg.no_inject_processes
+            .iter()
+            .any(|p| !p.trim().is_empty() && p.trim().eq_ignore_ascii_case(&exe))
+    }
+
+    /// 点击图标时取词：已有文字直接返回；否则核对来源窗口后注入一次
+    pub fn capture_on_click(state: &SelectionState) -> Option<SelectionPayload> {
+        // 没有可见的悬浮窗就没有可取的划词（同时挡住启动时的主动拉取）
+        if !state.is_visible() {
+            return None;
+        }
+        if let Some(p) = state.payload() {
+            if !p.text.trim().is_empty() {
+                return Some(p);
+            }
+        }
+        let (source, no_inject) = state.source()?;
+        if no_inject {
+            return None;
+        }
+        let cfg = HOOK_CFG.get()?;
+        let hwnd = source as HWND;
+        if !ensure_foreground(hwnd) {
+            return None;
+        }
+        let plan = plan_for(
+            key_down(VK_CONTROL),
+            key_down(VK_SHIFT) || key_down(VK_MENU) || key_down(VK_LWIN) || key_down(VK_RWIN),
+        );
+        let text = capture_selected_text(
+            Duration::from_millis(cfg.capture_timeout_ms.max(50)),
+            plan,
+        )?;
+        let text = accept_text(&text, cfg.min_chars, cfg.max_chars)?;
+        let payload = SelectionPayload {
+            text,
+            source: window_title(hwnd),
+        };
+        state.set_payload(Some(payload.clone()));
+        clear_arm();
+        Some(payload)
+    }
+
+    /// 前台必须是来源窗口；若被自身窗口抢到前台，尝试拉回来源窗口再核对
+    fn ensure_foreground(hwnd: HWND) -> bool {
+        let fg = unsafe { GetForegroundWindow() };
+        if fg as isize == hwnd as isize {
+            return true;
+        }
+        if fg.is_null() || pid_of(fg) == unsafe { GetCurrentProcessId() } {
+            unsafe { SetForegroundWindow(hwnd) };
+            std::thread::sleep(Duration::from_millis(30));
+            return unsafe { GetForegroundWindow() } as isize == hwnd as isize;
+        }
+        false
+    }
+
+    /// 模拟复制并读回选中文本；只在剪贴板仍是本次结果时才还原此前的文本。
+    fn capture_selected_text(timeout: Duration, plan: KeyPlan) -> Option<String> {
+        if plan == KeyPlan::Skip {
+            return None;
+        }
         let mut clipboard = arboard::Clipboard::new().ok()?;
         let before = clipboard.get_text().ok();
         let seq_before = unsafe { GetClipboardSequenceNumber() };
 
-        send_ctrl_c();
+        INJECTING.store(true, Ordering::SeqCst);
+        send_copy(plan);
 
         let deadline = Instant::now() + timeout;
         let mut grabbed: Option<String> = None;
+        let mut seq_after = seq_before;
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(30));
-            if unsafe { GetClipboardSequenceNumber() } == seq_before {
+            let seq = unsafe { GetClipboardSequenceNumber() };
+            if seq == seq_before {
                 continue;
             }
+            seq_after = seq;
             match clipboard.get_text() {
                 Ok(t) if !t.trim().is_empty() => {
                     grabbed = Some(t);
@@ -354,17 +677,37 @@ mod windows_impl {
             }
         }
 
-        // 还原原剪贴板（仅文本；原本没有文本时保留复制结果，避免清空用户内容）
-        if let Some(prev) = before {
-            if grabbed.as_deref() != Some(prev.as_str()) {
-                let _ = clipboard.set_text(prev);
+        // 只有「本次取词确实改了剪贴板、且此后没人再写」才还原，避免冲掉用户自己的复制
+        let last_seq = unsafe { GetClipboardSequenceNumber() };
+        if last_seq != seq_before && last_seq == seq_after {
+            if let Some(prev) = before {
+                if grabbed.as_deref() != Some(prev.as_str()) {
+                    let _ = clipboard.set_text(prev);
+                }
             }
         }
+        SELF_SEQ.store(unsafe { GetClipboardSequenceNumber() }, Ordering::SeqCst);
+        INJECTING.store(false, Ordering::SeqCst);
         grabbed
     }
 
-    fn send_ctrl_c() {
-        let inputs = [key_input(VK_CONTROL, false), key_input(VK_C_KEY, false), key_input(VK_C_KEY, true), key_input(VK_CONTROL, true)];
+    /// 按方案注入：只按下自己需要的键，也只释放自己按下过的键
+    fn send_copy(plan: KeyPlan) {
+        if plan == KeyPlan::Skip {
+            return;
+        }
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(4);
+        if plan == KeyPlan::FullCtrlC {
+            inputs.push(key_input(VK_CONTROL, false));
+        }
+        inputs.push(key_input(VK_C_KEY, false));
+        inputs.push(key_input(VK_C_KEY, true));
+        if plan == KeyPlan::FullCtrlC {
+            inputs.push(key_input(VK_CONTROL, true));
+        }
+        if inputs.is_empty() {
+            return;
+        }
         unsafe {
             SendInput(
                 inputs.len() as u32,
@@ -387,6 +730,43 @@ mod windows_impl {
         input
     }
 
+    fn key_down(vk: u16) -> bool {
+        unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+    }
+
+    fn pid_of(hwnd: HWND) -> u32 {
+        let mut pid: u32 = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        pid
+    }
+
+    fn window_class(hwnd: HWND) -> String {
+        let mut buf = [0u16; 256];
+        let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if n <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+
+    fn process_name(pid: u32) -> String {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return String::new();
+            }
+            let mut buf = [0u16; 512];
+            let mut size = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size);
+            CloseHandle(handle);
+            if ok == 0 {
+                return String::new();
+            }
+            let path = String::from_utf16_lossy(&buf[..size as usize]);
+            process_basename(&path).to_string()
+        }
+    }
+
     fn window_title(hwnd: HWND) -> String {
         let mut buf = [0u16; 256];
         let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
@@ -400,12 +780,57 @@ mod windows_impl {
             .collect()
     }
 
-    /// 光标右下显示悬浮图标
-    fn show_selector(app: &AppHandle, state: &SelectionState, payload: SelectionPayload) {
+    /// 屏幕坐标下最顶层窗口的根（顶层）窗口；钩子先于激活触发时用它取真实目标
+    fn root_window_at(pt: POINT) -> HWND {
+        unsafe {
+            let child = WindowFromPoint(pt);
+            if child.is_null() {
+                return child;
+            }
+            let root = GetAncestor(child, GA_ROOT);
+            if root.is_null() {
+                child
+            } else {
+                root
+            }
+        }
+    }
+
+    /// 屏幕坐标是否落在窗口客户区内（标题栏、边框、调整边框都不算）
+    fn client_area_contains(hwnd: HWND, pt: POINT) -> bool {
+        unsafe {
+            let mut rc: RECT = std::mem::zeroed();
+            if GetClientRect(hwnd, &mut rc) == 0 {
+                return false;
+            }
+            let mut tl = POINT {
+                x: rc.left,
+                y: rc.top,
+            };
+            let mut br = POINT {
+                x: rc.right,
+                y: rc.bottom,
+            };
+            if ClientToScreen(hwnd, &mut tl) == 0 || ClientToScreen(hwnd, &mut br) == 0 {
+                return false;
+            }
+            pt.x >= tl.x && pt.x < br.x && pt.y >= tl.y && pt.y < br.y
+        }
+    }
+
+    /// 光标右下显示悬浮图标（`text` 为空表示等用户点击才取词）
+    fn show_selector(
+        app: &AppHandle,
+        state: &SelectionState,
+        payload: SelectionPayload,
+        hwnd: HWND,
+        no_inject: bool,
+    ) {
         let Some(win) = app.get_webview_window("selector") else {
             return;
         };
         state.set_payload(Some(payload.clone()));
+        state.set_source(Some((hwnd as isize, no_inject)));
         // 先渲染内容再显示，避免闪一帧空白
         let _ = win.emit("selection://show", payload);
 
@@ -444,6 +869,8 @@ mod windows_impl {
         state.set_visible(false);
         state.set_expanded(false);
         state.set_rect(None);
+        state.set_source(None);
+        clear_arm();
         if let Some(win) = app.get_webview_window("selector") {
             if let Some(hwnd) = raw_hwnd(&win) {
                 unsafe {
@@ -478,9 +905,7 @@ mod windows_impl {
         // 不抢焦点、不进 Alt+Tab
         unsafe {
             let style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
-            let want = style
-                | (WS_EX_NOACTIVATE as isize)
-                | (WS_EX_TOOLWINDOW as isize);
+            let want = style | (WS_EX_NOACTIVATE as isize) | (WS_EX_TOOLWINDOW as isize);
             if style != want {
                 SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, want);
             }
@@ -488,15 +913,7 @@ mod windows_impl {
             if show {
                 flags |= SWP_SHOWWINDOW;
             }
-            SetWindowPos(
-                hwnd as HWND,
-                HWND_TOPMOST,
-                x,
-                y,
-                w,
-                h,
-                flags,
-            );
+            SetWindowPos(hwnd as HWND, HWND_TOPMOST, x, y, w, h, flags);
         }
     }
 
@@ -542,11 +959,6 @@ mod windows_impl {
             ))
         }
     }
-
-    fn point_inside(rect: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
-        let (rx, ry, rw, rh) = rect;
-        x >= rx && x < rx + rw && y >= ry && y < ry + rh
-    }
 }
 
 // 非 Windows 平台：划词功能不可用，所有公共 API 做空实现
@@ -568,9 +980,14 @@ pub fn resize_selector(
 #[cfg(not(windows))]
 pub fn hide_selector(_app: &AppHandle, _state: &SelectionState) {}
 
+#[cfg(not(windows))]
+pub fn capture_on_click(state: &SelectionState) -> Option<SelectionPayload> {
+    state.payload()
+}
+
 // Windows 平台：重导出公共 API
 #[cfg(windows)]
-pub use windows_impl::{start, set_enabled, resize_selector, hide_selector};
+pub use windows_impl::{capture_on_click, hide_selector, resize_selector, set_enabled, start};
 
 #[cfg(test)]
 mod tests {
@@ -611,5 +1028,59 @@ mod tests {
             source: "记事本".into(),
         }));
         assert_eq!(st.payload().map(|p| p.text), Some("hi".into()));
+        assert!(st.source().is_none());
+        st.set_source(Some((42, true)));
+        assert_eq!(st.source(), Some((42, true)));
+    }
+
+    #[test]
+    fn terminal_window_classes() {
+        assert!(is_terminal_class("CASCADIA_HOSTING_WINDOW_CLASS"));
+        assert!(is_terminal_class("consolewindowclass"));
+        assert!(is_terminal_class("mintty"));
+        assert!(!is_terminal_class("Chrome_WidgetWin_1"));
+        assert!(!is_terminal_class("Notepad"));
+        assert!(!is_terminal_class(""));
+    }
+
+    #[test]
+    fn basename_of_process_path() {
+        assert_eq!(
+            process_basename(r"C:\Program Files\Microsoft VS Code\Code.exe"),
+            "Code.exe"
+        );
+        assert_eq!(process_basename("code.exe"), "code.exe");
+        assert_eq!(process_basename("\"C:\\Tools\\wt.exe\""), "wt.exe");
+        assert_eq!(process_basename(""), "");
+    }
+
+    #[test]
+    fn modifier_guard() {
+        assert_eq!(plan_for(false, false), KeyPlan::FullCtrlC);
+        // 用户已按住 Ctrl：只发 C，绝不碰 Ctrl
+        assert_eq!(plan_for(true, false), KeyPlan::OnlyC);
+        // 其它修饰键按下：本次不取词
+        assert_eq!(plan_for(false, true), KeyPlan::Skip);
+        assert_eq!(plan_for(true, true), KeyPlan::Skip);
+    }
+
+    #[test]
+    fn text_bounds() {
+        assert_eq!(accept_text("  hi  ", 2, 4000).as_deref(), Some("hi"));
+        assert!(accept_text("a", 2, 4000).is_none());
+        assert!(accept_text("", 2, 4000).is_none());
+        assert!(accept_text(&"x".repeat(4001), 2, 4000).is_none());
+        // 阈值 0 也至少 1 字
+        assert!(accept_text("", 0, 0).is_none());
+    }
+
+    #[test]
+    fn arm_window_expiry() {
+        assert!(!arm_expired(Duration::from_millis(100), 1200));
+        assert!(!arm_expired(Duration::from_millis(1200), 1200));
+        assert!(arm_expired(Duration::from_millis(1300), 1200));
+        // 配置异常时兜底为 200ms
+        assert!(!arm_expired(Duration::from_millis(150), 0));
+        assert!(arm_expired(Duration::from_millis(250), 0));
     }
 }
