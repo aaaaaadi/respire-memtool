@@ -87,6 +87,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: ${{ matrix.artifact }}
           path: release-assets/*
           if-no-files-found: error
@@ -155,3 +156,28 @@ jobs:
           else
             gh release create "$TAG" --title "memTools $TAG" --generate-notes release-assets/*
           fi
+
+  cleanup-receipt:
+    needs: [build, release]
+    if: ${{ always() && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Record the completed producer and delivery inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export CLEANUP_RELEASE_TAG="v$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          python3 .github/scripts/cleanup_artifacts.py stamp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-ready-v1
+          path: ${{ runner.temp }}/cleanup-ready.json
+          retention-days: 1
+          if-no-files-found: ignore

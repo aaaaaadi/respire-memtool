@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "repository": "risense-ai/respire-memtool",
+  "workflows": {
+    ".github/workflows/release.yml": {
+      "mode": "release",
+      "artifacts": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "consumer_workflows": []
+    }
+  }
+}
