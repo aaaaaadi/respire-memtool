@@ -1709,3 +1709,19 @@ button:focus-visible, .mem-item:focus-visible { outline: 2px solid var(--accent)
   .mem-content { background: #e9edf2; }
   .mem-item:hover { background: #eef1f5; }
 }
+
+/* 图谱节点定位：独立于画布，适应正常窗口和放大窗口。 */
+.graph-search-bar { display: flex; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
+.graph-search-field { position: relative; flex: 1; min-width: 0; }
+#graph-search { width: 100%; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-input); color: var(--text); font: inherit; font-size: 12px; }
+#graph-search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.graph-search-results { position: absolute; top: calc(100% + 5px); left: 0; right: 0; max-height: 250px; overflow-y: auto; z-index: 12; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-base); box-shadow: var(--shadow); }
+.graph-search-summary { padding: 8px 10px; color: var(--text-dim); font-size: 11px; }
+.graph-search-result { display: block; width: 100%; padding: 8px 10px; border: 0; border-top: 1px solid var(--border); text-align: left; background: transparent; color: var(--text); cursor: pointer; }
+.graph-search-result:hover, .graph-search-result:focus-visible { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
+.graph-search-result strong, .graph-search-result span { display: block; overflow-wrap: anywhere; }
+.graph-search-result span { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.graph-node-tooltip { position: absolute; max-width: min(270px, calc(100% - 8px)); padding: 8px 10px; z-index: 3; pointer-events: none; border: 1px solid #526581; border-radius: 7px; background: #141d2e; color: #edf3ff; font-size: 12px; line-height: 1.6; white-space: pre-line; overflow-wrap: anywhere; box-shadow: 0 4px 18px #0008; }
+/* 图谱背景始终为深色，详情文字固定为浅色，避免系统浅色主题造成冲突。 */
+.graph-detail { color: #edf3ff; }
+.graph-detail-meta, .graph-detail-body { color: #b7c4d8; }

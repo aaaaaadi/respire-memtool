@@ -6,6 +6,7 @@
 import { selectMemories, memoryForest } from "./memory-browser.js";
 
 import { GraphView } from "./graph/graphView.js";
+import { searchGraphNodes } from "./graph/interaction.js";
 
 const invoke = () => window.__TAURI__?.core?.invoke;
 const listen = () => window.__TAURI__?.event?.listen;
@@ -41,6 +42,9 @@ const graphEmpty = $("#graph-empty");
 const graphDetail = $("#graph-detail");
 const graphZoom = $("#graph-zoom");
 const graphRotate = $("#graph-rotate");
+const graphSearch = $("#graph-search");
+const graphSearchResults = $("#graph-search-results");
+const graphClearSelection = $("#graph-clear-selection");
 const graphRebuild = $("#graph-rebuild");
 const graphReload = $("#graph-reload");
 const graphExpand = $("#graph-expand");
@@ -478,7 +482,45 @@ async function pollGraph() {
   }
 }
 
+/** 搜索已加载图谱；候选使用文本节点，避免记忆标题被当成 HTML 执行。 */
+function renderGraphSearch() {
+  const query = graphSearch.value.trim();
+  graphSearchResults.replaceChildren();
+  graphSearchResults.classList.toggle("hidden", !query);
+  if (!query) return;
+  const matches = searchGraphNodes(graphView?.nodes || [], query);
+  const summary = document.createElement("div");
+  summary.className = "graph-search-summary";
+  summary.setAttribute("role", "status");
+  summary.textContent = matches.length ? "匹配 " + matches.length + " 个图谱节点" +
+    (matches.length > 30 ? "，先显示 30 个，请补充关键词" : "") : "没有匹配的图谱节点";
+  graphSearchResults.appendChild(summary);
+  for (const node of matches.slice(0, 30)) {
+    const button = document.createElement("button");
+    button.className = "graph-search-result";
+    const title = document.createElement("strong");
+    title.textContent = node.name || node.id;
+    const meta = document.createElement("span");
+    meta.textContent = [node.category, ...(node.tags || []), node.id].filter(Boolean).join(" · ");
+    button.append(title, meta);
+    button.addEventListener("click", () => {
+      if (!graphView?.selectNode(node.id, { moveCamera: true })) {
+        renderGraphSearch();
+        return;
+      }
+      graphSearchResults.classList.add("hidden");
+    });
+    graphSearchResults.appendChild(button);
+  }
+}
+
 function updateGraphStatus(info = {}) {
+  if (info.autoRotate !== undefined) {
+    graphAutoRotate = !!info.autoRotate;
+    graphRotate.classList.toggle("active", graphAutoRotate);
+  }
+  if (info.nodes !== undefined && graphSearch.value.trim() &&
+      !graphSearchResults.classList.contains("hidden")) renderGraphSearch();
   const n = info.nodes ?? graphView?.nodes?.length ?? 0;
   const m = info.links ?? graphView?.links?.length ?? 0;
   const parts = [];
@@ -506,7 +548,7 @@ function showGraphDetail(node) {
   close.title = "关闭";
   close.addEventListener("click", (e) => {
     e.stopPropagation();
-    hideGraphDetail();
+    graphView?.selectNode(null);
   });
 
   const title = document.createElement("div");
@@ -2046,6 +2088,40 @@ async function init() {
   targetsAdd.addEventListener("click", addTarget);
   targetsReset.addEventListener("click", resetTargets);
   targetsSave.addEventListener("click", saveTargets);
+
+  graphSearch.addEventListener("input", renderGraphSearch);
+  graphSearch.addEventListener("focus", renderGraphSearch);
+  graphSearch.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      graphSearch.value = "";
+      renderGraphSearch();
+    } else if (event.key === "Enter" || event.key === "ArrowDown") {
+      event.preventDefault();
+      const first = graphSearchResults.querySelector("button");
+      if (event.key === "Enter") first?.click();
+      else first?.focus();
+    }
+  });
+  graphSearchResults.addEventListener("keydown", event => {
+    const buttons = [...graphSearchResults.querySelectorAll("button")];
+    const index = buttons.indexOf(document.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      graphSearch.focus();
+      graphSearchResults.classList.add("hidden");
+    }
+    else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      buttons[Math.max(0, Math.min(buttons.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))]?.focus();
+    }
+  });
+  document.addEventListener("pointerdown", event => {
+    if (!event.target.closest(".graph-search-field")) graphSearchResults.classList.add("hidden");
+  });
+  graphClearSelection.addEventListener("click", () => graphView?.selectNode(null));
 
   // 3D 图谱工具栏
   graphZoom.addEventListener("click", () => graphView?.zoomToFit());

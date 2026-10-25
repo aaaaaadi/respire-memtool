@@ -6,6 +6,7 @@ import ForceGraph3D from "3d-force-graph";
 import * as THREE from "three";
 import containerPlyUrl from "./assets/brain2.container.ply?url";
 import { buildContainerVolume } from "./containerVolume.js";
+import { pickProjectedNode, isGraphClick } from "./interaction.js";
 
 const GOLDEN_ANGLE = 137.508;
 const FOCUS_HOLD_MS = 6000;
@@ -368,7 +369,8 @@ export class GraphView {
       .backgroundColor("#080b12")
       .showNavInfo(false)
       .nodeId("id")
-      .nodeLabel((n) => this._label(n))
+      .enablePointerInteraction(false)
+      .enableNodeDrag(false)
       .nodeThreeObject((n) => this._nodeObject(n))
       .nodeThreeObjectExtend(false)
       .linkColor((l) => l.color)
@@ -376,17 +378,9 @@ export class GraphView {
       .linkOpacity((l) => l.opacity)
       .linkDirectionalArrowLength((l) => (l.directed ? 3.5 : 0))
       .linkDirectionalArrowRelPos(0.9)
-      .linkDirectionalArrowColor((l) => l.color)
-      .onNodeClick((n) => {
-        this.pin(n ? n.id : null);
-        this.onNodeClick(n);
-      })
-      .onBackgroundClick(() => this.onNodeClick(null))
-      .onNodeHover((n) => {
-        this.container.style.cursor = n ? "pointer" : "grab";
-        this._setHover(n ? n.id : null);
-      });
+      .linkDirectionalArrowColor((l) => l.color);
     this.graph = graph;
+    this._initPicking();
 
     // 坐标全部固定，不需要力导向迭代
     graph.cooldownTicks(0);
@@ -415,6 +409,108 @@ export class GraphView {
     this.graph.pauseAnimation();
   }
 
+  /** 屏幕拾取独立于异步 hover；保留 OrbitControls 的旋转、缩放和触摸处理。 */
+  _initPicking() {
+    const canvas = this.graph.renderer().domElement;
+    const tooltip = document.createElement("div");
+    tooltip.className = "graph-node-tooltip hidden";
+    tooltip.setAttribute("role", "tooltip");
+    this.container.appendChild(tooltip);
+    this.tooltip = tooltip;
+    const point = event => ({ x: event.clientX, y: event.clientY,
+      pointerId: event.pointerId, button: event.button });
+    const down = event => {
+      this._pointerStart = event.button === 0 && event.isPrimary !== false
+        ? { ...point(event), maxDistance: 0 } : null;
+      this._hideTooltip();
+    };
+    const move = event => {
+      if (this._pointerStart) {
+        const start = this._pointerStart;
+        start.maxDistance = Math.max(start.maxDistance,
+          Math.hypot(start.x - event.clientX, start.y - event.clientY));
+        return;
+      }
+      const node = this._pickAtEvent(event);
+      this.container.style.cursor = node ? "pointer" : "grab";
+      this._setHover(node?.id);
+      tooltip.classList.toggle("hidden", !node);
+      if (node) {
+        tooltip.textContent = this._label(node);
+        const rect = this.container.getBoundingClientRect();
+        tooltip.style.left = Math.max(4, Math.min(event.clientX - rect.left + 14, rect.width - 280)) + "px";
+        tooltip.style.top = Math.max(4, Math.min(event.clientY - rect.top + 14, rect.height - 100)) + "px";
+      }
+    };
+    const up = event => {
+      const start = this._pointerStart;
+      this._pointerStart = null;
+      if (isGraphClick(start, point(event))) this.selectNode(this._pickAtEvent(event)?.id ?? null);
+    };
+    const leave = () => { this._hideTooltip(); this._setHover(null); };
+    const cancel = () => { this._pointerStart = null; leave(); };
+    this._pointerHandlers = { pointerdown: down, pointermove: move, pointerup: up,
+      pointerleave: leave, pointercancel: cancel };
+    for (const [type, listener] of Object.entries(this._pointerHandlers))
+      canvas.addEventListener(type, listener, { capture: true });
+  }
+
+  _hideTooltip() {
+    this.tooltip?.classList.add("hidden");
+  }
+
+  /** 投影后的最小点击半径为 CSS 像素，不随缩放或显示器像素密度缩小。 */
+  _pickAtEvent(event) {
+    if (!this.active) return null;
+    const rect = this.graph.renderer().domElement.getBoundingClientRect();
+    const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    if (pointer.x < 0 || pointer.y < 0 || pointer.x > rect.width || pointer.y > rect.height) return null;
+    const camera = this.graph.camera();
+    camera.updateMatrixWorld();
+    const position = new THREE.Vector3();
+    const view = new THREE.Vector3();
+    const projected = new THREE.Vector3();
+    const scale = rect.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+    const points = [];
+    for (const node of this.nodes) {
+      position.set(node.x, node.y, node.z);
+      view.copy(position).applyMatrix4(camera.matrixWorldInverse);
+      projected.copy(position).project(camera);
+      if (view.z >= 0 || projected.z < -1 || projected.z > 1) continue;
+      const radius = this.objects.get(node.id)?.userData.mesh.scale.x ?? NODE_BASE_RADIUS;
+      points.push({ node, x: (projected.x + 1) * rect.width / 2,
+        y: (1 - projected.y) * rect.height / 2, z: -view.z, radius: radius * scale / -view.z });
+    }
+    return pickProjectedNode(points, pointer);
+  }
+
+  /** 锁定详情并暂停自转；搜索定位可将相机朝同一节点平滑拉近。 */
+  selectNode(id, { moveCamera = false } = {}) {
+    const node = id == null ? null : this.nodeById.get(String(id));
+    if (id != null && !node) return false;
+    clearTimeout(this.hoverTimer);
+    this.hoverId = null;
+    this._hideTooltip();
+    if (!node) {
+      this.clearFocus();
+      this.onNodeClick(null);
+      return true;
+    }
+    this.setAutoRotate(false);
+    this.onStatus({ autoRotate: false });
+    this.pin(node.id);
+    this.onNodeClick(node);
+    if (moveCamera) {
+      const controls = this.graph.controls();
+      const direction = this.graph.camera().position.clone().sub(controls.target);
+      if (!direction.lengthSq()) direction.set(0, 0.15, 1);
+      direction.normalize().multiplyScalar(Math.max(120, NODE_BASE_RADIUS * 36));
+      this.graph.cameraPosition({ x: node.x + direction.x, y: node.y + direction.y,
+        z: node.z + direction.z }, { x: node.x, y: node.y, z: node.z }, 500);
+    }
+    return true;
+  }
+
   resize() {
     if (!this.graph) return;
     const w = Math.max(1, this.container.clientWidth);
@@ -430,6 +526,8 @@ export class GraphView {
       this.graph.resumeAnimation();
     } else {
       this.graph.pauseAnimation();
+      this._pointerStart = null;
+      this._hideTooltip();
     }
   }
 
@@ -481,6 +579,8 @@ export class GraphView {
     this.hoverTimer = null;
     this.hoverId = null;
     this.pinnedId = null;
+    this.onNodeClick(null);
+    this._hideTooltip();
     this._cancelFade();
 
     this._applyContainerFit();
@@ -527,6 +627,8 @@ export class GraphView {
         if (!id) continue;
         this.nodes = this.nodes.filter((n) => n.id !== id);
         this.nodeById.delete(id);
+        if (this.pinnedId === id) this.selectNode(null);
+        if (this.hoverId === id) { this.hoverId = null; this._hideTooltip(); }
         this.links = this.links.filter((l) => {
           const s = l.source?.id ?? l.source;
           const t = l.target?.id ?? l.target;
@@ -828,8 +930,8 @@ export class GraphView {
   }
 
   _roots() {
-    if (this.hoverId && this.nodeById.has(this.hoverId)) return [this.hoverId];
     if (this.pinnedId && this.nodeById.has(this.pinnedId)) return [this.pinnedId];
+    if (this.hoverId && this.nodeById.has(this.hoverId)) return [this.hoverId];
     return [...this.focusIds].filter((id) => this.nodeById.has(id));
   }
 
@@ -1247,6 +1349,9 @@ export class GraphView {
   }
 
   dispose() {
+    const canvas = this.graph?.renderer().domElement;
+    for (const [type, listener] of Object.entries(this._pointerHandlers || {}))
+      canvas?.removeEventListener(type, listener, { capture: true });
     clearTimeout(this.focusTimer);
     clearTimeout(this.hoverTimer);
     this._cancelFade();
