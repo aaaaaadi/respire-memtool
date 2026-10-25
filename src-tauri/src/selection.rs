@@ -26,7 +26,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::config::SelectionConfig;
 
-/// 收起态图标窗口尺寸（物理像素）
+/// 收起态图标尺寸（CSS 逻辑像素；显示时按目标屏幕 DPI 转换）
 const ICON_W: i32 = 40;
 const ICON_H: i32 = 40;
 /// 展开态面板尺寸（与 selection.css 约定一致）
@@ -258,6 +258,24 @@ fn post(t: Trigger) {
     }
 }
 
+/// CSS 尺寸转为屏幕物理像素；窗口、工作区避让和鼠标命中共用转换结果。
+fn selector_size(expanded: bool, scale_factor: f64) -> (i32, i32) {
+    let (w, h) = if expanded {
+        (PANEL_W, PANEL_H)
+    } else {
+        (ICON_W, ICON_H)
+    };
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    (
+        (w as f64 * scale).ceil() as i32,
+        (h as f64 * scale).ceil() as i32,
+    )
+}
+
 fn point_inside(rect: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
     let (rx, ry, rw, rh) = rect;
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
@@ -291,6 +309,7 @@ mod windows_impl {
         HWND_TOPMOST, MSLLHOOKSTRUCT, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WH_MOUSE_LL,
         WM_LBUTTONDOWN, WM_LBUTTONUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
+
     use arboard;
 
     /// 启动钩子与取词线程（只启动一次；`enabled=false` 时仍安装钩子，但内部直接忽略）
@@ -836,9 +855,10 @@ mod windows_impl {
 
         let offset = HOOK_CFG.get().map(|c| c.offset_px.max(0)).unwrap_or(14);
         let (cx, cy) = cursor_pos();
-        let (x, y) = clamp_to_work_area(cx + offset, cy + offset, ICON_W, ICON_H);
-        apply_rect(&win, x, y, ICON_W, ICON_H, true);
-        state.set_rect(Some((x, y, ICON_W, ICON_H)));
+        let (w, h) = selector_size_at(&win, cx, cy, false);
+        let (x, y) = clamp_to_work_area(cx + offset, cy + offset, w, h, (cx, cy));
+        apply_rect(&win, x, y, w, h, true);
+        state.set_rect(Some((x, y, w, h)));
         state.set_expanded(false);
         state.set_visible(true);
     }
@@ -852,13 +872,9 @@ mod windows_impl {
         let win = app
             .get_webview_window("selector")
             .ok_or_else(|| "悬浮窗不存在".to_string())?;
-        let (w, h) = if expanded {
-            (PANEL_W, PANEL_H)
-        } else {
-            (ICON_W, ICON_H)
-        };
         let (cx, cy) = state.rect().map(|r| (r.0, r.1)).unwrap_or_else(cursor_pos);
-        let (x, y) = clamp_to_work_area(cx, cy, w, h);
+        let (w, h) = selector_size_at(&win, cx, cy, expanded);
+        let (x, y) = clamp_to_work_area(cx, cy, w, h, (cx, cy));
         apply_rect(&win, x, y, w, h, true);
         state.set_rect(Some((x, y, w, h)));
         state.set_expanded(expanded);
@@ -889,6 +905,18 @@ mod windows_impl {
         if !on {
             hide_selector(app, state);
         }
+    }
+
+    /// 按即将显示的位置取 DPI，不能沿用隐藏窗口上一次所在屏幕的缩放。
+    fn selector_size_at(win: &tauri::WebviewWindow, x: i32, y: i32, expanded: bool) -> (i32, i32) {
+        let scale = win
+            .monitor_from_point(x as f64, y as f64)
+            .ok()
+            .flatten()
+            .map(|monitor| monitor.scale_factor())
+            .or_else(|| win.scale_factor().ok())
+            .unwrap_or(1.0);
+        selector_size(expanded, scale)
     }
 
     /// 窗口置顶显示（不激活）。`show=false` 时仅调整位置/尺寸。
@@ -931,8 +959,8 @@ mod windows_impl {
     }
 
     /// 把窗口限制在光标所在显示器的工作区内（多屏 / 任务栏 / DPI 均已由系统给物理像素）
-    fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
-        let Some((left, top, right, bottom)) = work_area(x, y) else {
+    fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, anchor: (i32, i32)) -> (i32, i32) {
+        let Some((left, top, right, bottom)) = work_area(anchor.0, anchor.1) else {
             return (x, y);
         };
         let nx = x.clamp(left, (right - w).max(left));
@@ -992,6 +1020,23 @@ pub use windows_impl::{capture_on_click, hide_selector, resize_selector, set_ena
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_scales_icon_and_panel_to_physical_pixels() {
+        assert_eq!(selector_size(false, 1.0), (40, 40));
+        assert_eq!(selector_size(false, 1.25), (50, 50));
+        assert_eq!(selector_size(false, 1.5), (60, 60));
+        assert_eq!(selector_size(false, 2.0), (80, 80));
+        assert_eq!(selector_size(true, 1.5), (420, 252));
+        assert_eq!(selector_size(true, 2.0), (560, 336));
+    }
+
+    #[test]
+    fn scaled_selector_hit_area_includes_visible_right_and_bottom_edges() {
+        let (w, h) = selector_size(false, 1.5);
+        assert!(point_inside((100, 100, w, h), 159, 159));
+        assert!(!point_inside((100, 100, w, h), 160, 160));
+    }
 
     #[test]
     fn drag_threshold() {
