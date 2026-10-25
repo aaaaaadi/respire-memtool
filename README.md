@@ -65,12 +65,16 @@ memTools 是一个基于 Tauri 2 的桌面快捷记录工具：用全局热键�
 
 | 顺序 | 位置 |
 | --- | --- |
-| 1 | 环境变量 `MEMTOOLS_CONFIG` 指向的文件（绝对路径） |
-| 2 | 可执行文件同目录的 `config.toml`（便携模式） |
-| 3 | Windows：`%APPDATA%\com.memtools.desktop\config.toml`；macOS：`~/Library/Application Support/com.memtools.desktop/config.toml`；Linux：`$XDG_CONFIG_HOME/com.memtools.desktop/config.toml`（未设置时用 `~/.config/...`） |
+| 1 | 环境变量 `MEMTOOLS_CONFIG` 指向的文件（建议使用绝对路径） |
+| 2 | Windows：`%APPDATA%\com.memtools.desktop\config.toml`；macOS：`~/Library/Application Support/com.memtools.desktop/config.toml`；Linux：`$XDG_CONFIG_HOME/com.memtools.desktop/config.toml`（未设置时用 `~/.config/...`） |
+| 3 | 可执行文件同目录的 `config.toml`（便携模式） |
 | 4 | 编译进程序的内置默认值 |
 
-debug 构建会在第 3 项之前额外读取源码目录的 `src-tauri/config.toml`，便于开发时直接改模板；release 构建不参与。
+已有用户配置优先于便携配置，避免升级或移动程序改变配置。debug 构建仅在以上位置均无配置时读取源码目录的 `src-tauri/config.toml`；release 构建从不读取编译机器上的源码路径。显式指定的文件缺失、配置无法读取或解析时使用内置默认值，保留原文件，不改读其他位置。首次启动只以不覆盖已有文件的方式创建用户模板。
+
+内置默认值和模板均使用官方更新清单 `https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json`。自定义更新地址（包括本机测试通道）会按原配置保留。
+
+可在源码目录运行 `cargo run --release --manifest-path src-tauri/Cargo.toml --example config_update_probe`，只读检查实际配置位置、记忆服务状态和更新版本；不会输出配置正文或记忆内容。
 
 ### 热键与窗口
 

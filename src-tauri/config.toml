@@ -83,11 +83,11 @@ token = ""
 # ---- 自动更新（P7）----
 # 客户端 GET endpoint 取 update.json，比版本 → 下载 exe → SHA-256 校验 →
 # 由新 exe 以 --apply-update 等待旧进程退出后自替换并重启。
-# 本机演示：node devtools/update-server.mjs（默认 127.0.0.1:17651）
+# 本机演示需显式将 endpoint 改为 http://127.0.0.1:17651/update.json，并运行 node devtools/update-server.mjs。
 # 公网分发：把 update.json 与 exe 放到 Gitee / 对象存储，改这里的 endpoint 即可。
 [update]
 enabled = true
-endpoint = "http://127.0.0.1:17651/update.json"
+endpoint = "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
 check_on_start = true
 
 # ---- 全局划词悬浮（P8）----

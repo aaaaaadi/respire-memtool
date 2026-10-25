@@ -1,4 +1,4 @@
-//! memTools 配置：读取 src-tauri/config.toml（热键/端口/自动化模式/窗口行为）
+//! memTools 配置：用户配置优先，发布包不依赖源码目录。
 
 use serde::Deserialize;
 
@@ -197,7 +197,9 @@ impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            endpoint: "http://127.0.0.1:17651/update.json".into(),
+            endpoint:
+                "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+                    .into(),
             check_on_start: true,
         }
     }
@@ -496,24 +498,102 @@ fn pick<'a>(custom: &'a str, default: &'a str) -> &'a str {
 }
 
 impl AppConfig {
-    /// `config.toml` 的固定路径（编译期 `CARGO_MANIFEST_DIR`，换目录放 exe 仍读这里）
-    pub fn path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml")
+    /// 当前平台的用户配置目录，与 Tauri 的 app_config_dir 保持一致。
+    fn user_config_path() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("com.memtools.desktop").join("config.toml"))
     }
 
-    /// 从 src-tauri/config.toml 加载；失败时返回内置默认值
-    pub fn load() -> Self {
-        let path = Self::path();
-        match std::fs::read_to_string(&path) {
+    /// 显式路径优先，其次用户配置、便携配置、仅 debug 可用的源码配置。
+    /// 显式路径即使缺失也不改读其他文件，避免误用另一套账号或网络配置。
+    fn resolve_path(
+        explicit: Option<std::path::PathBuf>,
+        user: Option<std::path::PathBuf>,
+        portable: Option<std::path::PathBuf>,
+        development: Option<std::path::PathBuf>,
+    ) -> Option<std::path::PathBuf> {
+        if explicit.is_some() {
+            return explicit;
+        }
+        for path in [&user, &portable, &development].into_iter().flatten() {
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
+        user.or(portable)
+    }
+
+    /// 返回实际加载位置；发布包不依赖构建机器上的源码绝对路径。
+    pub fn path() -> std::path::PathBuf {
+        let explicit = std::env::var_os("MEMTOOLS_CONFIG")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        let portable = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("config.toml")));
+        let development = if cfg!(debug_assertions) {
+            Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml"))
+        } else {
+            None
+        };
+        Self::resolve_path(explicit, Self::user_config_path(), portable, development)
+            .unwrap_or_else(|| std::path::PathBuf::from("config.toml"))
+    }
+
+    /// 首次启动生成可编辑的用户模板；已有文件（包括损坏文件）绝不覆盖。
+    fn initialize_user_config(path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        file.write_all(include_str!("../config.toml").as_bytes())
+    }
+
+    /// 读取已选文件；无效配置只回退默认值，不改读低优先级配置或改写原文件。
+    fn load_from_path(path: &std::path::Path) -> Self {
+        match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<AppConfig>(&text) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    eprintln!("[memTools] config.toml 解析失败，使用默认配置: {e}");
+                Ok(config) => config,
+                Err(_) => {
+                    // TOML 的完整错误可能包含配置原文及密钥，不输出原文。
+                    eprintln!(
+                        "[memTools] 配置解析失败（{}），使用默认配置",
+                        path.display()
+                    );
                     Self::default_config()
                 }
             },
-            Err(_) => Self::default_config(),
+            Err(error) => {
+                eprintln!(
+                    "[memTools] 读取配置失败（{}）：{error}，使用默认配置",
+                    path.display()
+                );
+                Self::default_config()
+            }
         }
+    }
+
+    /// 初始化缺失的用户配置并加载；MEMTOOLS_CONFIG 指定文件由用户自行维护。
+    pub fn load() -> Self {
+        // 1. 路径选择与状态界面共用 path()，保证显示位置与实际读取位置一致。
+        let path = Self::path();
+        let has_explicit =
+            std::env::var_os("MEMTOOLS_CONFIG").is_some_and(|value| !value.is_empty());
+        // 2. 只为首次启动创建用户模板，保留显式/便携/开发配置及已有用户内容。
+        if !has_explicit && Self::user_config_path().as_deref() == Some(path.as_path()) {
+            if let Err(error) = Self::initialize_user_config(&path) {
+                eprintln!("[memTools] 初始化配置失败（{}）：{error}", path.display());
+            }
+        }
+        Self::load_from_path(&path)
     }
 
     fn default_config() -> Self {
@@ -563,5 +643,140 @@ impl AppConfig {
             reminder: ReminderConfig::default(),
             processor: ProcessorConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod config_loading_tests {
+    use super::*;
+
+    #[test]
+    fn missing_configuration_uses_public_update_feed() {
+        let cfg = AppConfig::default_config();
+        assert_eq!(
+            cfg.update.endpoint,
+            "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+        );
+    }
+
+    #[test]
+    fn distributed_template_uses_public_update_feed() {
+        let cfg: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        assert_eq!(
+            cfg.update.endpoint,
+            "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+        );
+    }
+
+    struct ConfigFixture(std::path::PathBuf);
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("memtools-config-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+        fn write(&self, name: &str, text: &str) -> std::path::PathBuf {
+            let path = self.path(name);
+            std::fs::write(&path, text).unwrap();
+            path
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn installed_app_reads_user_configuration_before_portable_or_source() {
+        let fixture = ConfigFixture::new();
+        let user = fixture.write(
+            "user.toml",
+            &include_str!("../config.toml")
+                .replace("check_on_start = true", "check_on_start = false"),
+        );
+        let portable = fixture.write("portable.toml", include_str!("../config.toml"));
+        let source = fixture.write("source.toml", include_str!("../config.toml"));
+        let selected =
+            AppConfig::resolve_path(None, Some(user.clone()), Some(portable), Some(source))
+                .unwrap();
+        assert_eq!(selected, user);
+        assert!(!AppConfig::load_from_path(&selected).update.check_on_start);
+    }
+
+    #[test]
+    fn explicit_missing_file_does_not_silently_load_another_configuration() {
+        let fixture = ConfigFixture::new();
+        let explicit = fixture.path("missing.toml");
+        let user = fixture.write("user.toml", include_str!("../config.toml"));
+        assert_eq!(
+            AppConfig::resolve_path(Some(explicit.clone()), Some(user), None, None),
+            Some(explicit)
+        );
+    }
+
+    #[test]
+    fn portable_and_debug_configuration_remain_available_without_user_file() {
+        let fixture = ConfigFixture::new();
+        let user = fixture.path("missing.toml");
+        let portable = fixture.write("portable.toml", include_str!("../config.toml"));
+        let source = fixture.write("source.toml", include_str!("../config.toml"));
+        assert_eq!(
+            AppConfig::resolve_path(
+                None,
+                Some(user.clone()),
+                Some(portable.clone()),
+                Some(source.clone())
+            ),
+            Some(portable)
+        );
+        assert_eq!(
+            AppConfig::resolve_path(None, Some(user.clone()), None, Some(source)),
+            Some(fixture.path("source.toml"))
+        );
+        assert_eq!(
+            AppConfig::resolve_path(None, Some(user.clone()), None, None),
+            Some(user)
+        );
+    }
+
+    #[test]
+    fn first_launch_creates_public_feed_template_without_overwriting_edits() {
+        let fixture = ConfigFixture::new();
+        let user = fixture.path("nested/config.toml");
+        AppConfig::initialize_user_config(&user).unwrap();
+        assert_eq!(
+            AppConfig::load_from_path(&user).update.endpoint,
+            "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+        );
+        let custom = std::fs::read_to_string(&user).unwrap().replace(
+            "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json",
+            "http://127.0.0.1:17651/update.json",
+        );
+        std::fs::write(&user, &custom).unwrap();
+        AppConfig::initialize_user_config(&user).unwrap();
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), custom);
+        assert_eq!(
+            AppConfig::load_from_path(&user).update.endpoint,
+            "http://127.0.0.1:17651/update.json"
+        );
+    }
+
+    #[test]
+    fn invalid_user_configuration_is_preserved_and_falls_back_to_public_updates() {
+        let fixture = ConfigFixture::new();
+        let user = fixture.write("broken.toml", "not = [ valid");
+        let cfg = AppConfig::load_from_path(&user);
+        assert_eq!(
+            cfg.update.endpoint,
+            "https://github.com/risense-ai/respire-memtool/releases/latest/download/update.json"
+        );
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), "not = [ valid");
     }
 }
