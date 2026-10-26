@@ -22,6 +22,7 @@ pub mod targets;
 pub mod extension_setup;
 pub mod updater;
 pub mod update_http;
+mod window_position;
 
 use std::sync::Arc;
 
@@ -1703,8 +1704,26 @@ fn window_state_path(app: &AppHandle) -> std::path::PathBuf {
     dir.join("window_state.json")
 }
 
+/// 换屏或分辨率变化后，在当前工作区内恢复主窗口，避免托盘唤起到屏幕外。
+fn ensure_window_on_screen(win: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let position = win.outer_position()?;
+    let size = win.outer_size()?;
+    let areas = win.available_monitors()?.iter().map(|monitor| {
+        let area = monitor.work_area();
+        (area.position, area.size)
+    }).collect::<Vec<_>>();
+    let visible = window_position::visible_position(position, size, &areas);
+    if visible != position {
+        win.set_position(visible)?;
+    }
+    Ok(())
+}
+
 fn save_window_position(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        if win.is_minimized().unwrap_or(true) {
+            return;
+        }
         if let Ok(pos) = win.outer_position() {
             if let Ok(data) = serde_json::to_string(&(pos.x, pos.y)) {
                 let _ = std::fs::write(window_state_path(app), data);
@@ -1718,7 +1737,13 @@ fn restore_window_position(app: &AppHandle) {
     if let Ok(data) = std::fs::read_to_string(&path) {
         if let Ok((x, y)) = serde_json::from_str::<(i32, i32)>(&data) {
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_position(PhysicalPosition::new(x, y));
+                if win.set_position(PhysicalPosition::new(x, y)).is_ok() {
+                    if let Err(error) = ensure_window_on_screen(&win) {
+                        eprintln!("恢复窗口位置失败: {error}");
+                    } else {
+                        save_window_position(app);
+                    }
+                }
             }
         }
     }
@@ -1741,6 +1766,12 @@ fn register_hotkey(app: &AppHandle, spec: &str) -> Result<(), Box<dyn std::error
 /// 显示并聚焦小窗（托盘菜单用）
 fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        if let Err(error) = ensure_window_on_screen(&win) {
+            eprintln!("检查窗口可见范围失败: {error}");
+        } else {
+            save_window_position(app);
+        }
         let _ = win.show();
         let _ = win.set_focus();
         let _ = app.emit("memtools-shown", ());
@@ -1750,7 +1781,7 @@ fn show_window(app: &AppHandle) {
 /// 唤起/隐藏小窗
 fn toggle_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        if win.is_visible().unwrap_or(false) {
+        if win.is_visible().unwrap_or(false) && !win.is_minimized().unwrap_or(false) {
             save_window_position(app);
             let _ = win.hide();
         } else {
