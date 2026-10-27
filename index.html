@@ -95,6 +95,7 @@
         <input id="hint-input" type="text" placeholder="项目名 / 关键词（可选，提升判重准确度）" spellcheck="false" />
       </div>
 
+      <div id="write-destination" class="browse-status" role="status"></div>
       <!-- 层一：去向 -->
       <section class="menu-level" id="level-1">
         <div class="level-label">存到哪里</div>
@@ -107,6 +108,8 @@
       <!-- 层二：分类树（仅主区） -->
       <section class="menu-level hidden" id="level-2">
         <div class="level-label">挂哪棵树</div>
+        <input id="parent-query" class="memory-query" type="search" placeholder="搜索具体上级节点的标题或 ID" aria-label="选择上级节点" />
+        <div id="parent-results" class="tree-chips"></div>
         <div id="tree-groups" class="tree-groups"></div>
       </section>
 
@@ -134,6 +137,7 @@
         </div>
         <button id="browse-refresh" class="mini-btn">刷新</button>
       </div>
+      <label class="browse-count">资料 <select id="browse-source" aria-label="资料类型"><option value="all">全部资料</option><option value="main">主记忆</option><option value="diary">日记</option></select></label>
       <div class="browse-cats" id="browse-cats"></div>
       <div id="browse-status" class="browse-status memory-status" role="status"></div>
       <div class="browse-list" id="browse-list"></div>

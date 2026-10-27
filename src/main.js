@@ -4,6 +4,7 @@
    ============================================================ */
 
 import { selectMemories, memoryForest } from "./memory-browser.js";
+import { matchingFragments, queryPattern, evidenceLabel, isDiary } from "./diary-fragments.js";
 
 import { GraphView } from "./graph/graphView.js";
 import { searchGraphNodes } from "./graph/interaction.js";
@@ -113,6 +114,7 @@ let taxonomy = [];            // [{id,name,domain}]
 let selectedTarget = "main";  // main | journal
 let selectedTree = null;      // 树根 name
 let selectedType = "context";
+let selectedParent = null; // 明确选择的真实上级 ID；分类树选择会清空它。
 let autoMode = false;         // 自动化开关
 let inputMode = "free";       // free | sections（三段模板）
 let currentView = "write";    // write | browse
@@ -280,6 +282,8 @@ function selectTree(chip) {
   treeGroups.querySelectorAll(".tree-chip").forEach((c) => c.classList.remove("active"));
   chip.classList.add("active");
   selectedTree = chip.dataset.name;
+  selectedParent = null;
+  updateDestination();
 }
 
 // ---- 渲染：type ----
@@ -710,23 +714,26 @@ async function loadRecent(force = false) {
 
 function renderRecent() {
   const query = browseQuery.value.trim();
-  const candidates = selectMemories(memoryCatalog || [], { category: browseCategory, query });
+  const candidates = selectMemories(memoryCatalog || [], { category: browseCategory, query }).filter(entry => {
+    const kind = $("#browse-source").value;
+    return kind === "all" || (kind === "diary" ? isDiary(entry) : !isDiary(entry));
+  });
   const limit = Number(browseCount.value) || 0;
   const matches = limit > 0 ? candidates.slice(0, limit) : candidates;
   browseStatus.className = "browse-status memory-status";
   browseStatus.textContent = (browseCategory ? "「" + browseCategory + "」 · " : "") + (query ? "匹配 " : "显示 ") + matches.length + " 条 / 当前范围 " + candidates.length + " 条 · 全库 " + (memoryCatalog?.length || 0) + " 条";
-  renderMemoryCollection(browseList, matches, browseMode, browseCollapsed, Boolean(query), browseCategory ? "当前分类暂无匹配记忆。" : "没有匹配的记忆。");
+  renderMemoryCollection(browseList, matches, browseMode, browseCollapsed, Boolean(query), browseCategory ? "当前分类暂无匹配记忆。" : "没有匹配的记忆。", query);
 }
 
 // 列表与树形共用同一匹配集合；树中补足的祖先只作为路径展示。
-function renderMemoryCollection(container, matches, mode, collapsed, searching, emptyMessage) {
+function renderMemoryCollection(container, matches, mode, collapsed, searching, emptyMessage, query = "") {
   container.innerHTML = "";
   if (!matches.length) {
     const empty = document.createElement("div"); empty.className = "browse-empty"; empty.textContent = emptyMessage;
     container.appendChild(empty); return;
   }
   if (mode === "list") {
-    for (const entry of matches) container.appendChild(buildMemItem(entry));
+    for (const entry of matches) container.appendChild(buildMemItem(entry, query));
     return;
   }
   const roots = memoryForest(memoryCatalog || [], matches);
@@ -735,7 +742,7 @@ function renderMemoryCollection(container, matches, mode, collapsed, searching, 
     for (const node of nodes) {
       const item = document.createElement("li"); item.className = "memory-tree-node";
       const line = document.createElement("div"); line.className = "memory-tree-line"; line.style.setProperty("--tree-depth", depth);
-      const card = buildMemItem(node.entry);
+      const card = buildMemItem(node.entry, node.matched ? query : "");
       if (!node.matched) { card.classList.add("path-context"); card.title = "上级路径，不计入匹配数量"; }
       let children;
       const fold = document.createElement("button"); fold.className = "tree-fold"; fold.type = "button";
@@ -764,9 +771,10 @@ function renderMemoryCollection(container, matches, mode, collapsed, searching, 
 }
 
 /// 统一的记忆卡片：标题 + 元信息 + 可展开正文（最近/搜索共用）
-function buildMemItem(it) {
+function buildMemItem(it, query = "") {
   const row = document.createElement("div");
   row.className = "mem-item";
+  row.dataset.memoryId = it.id || "";
 
   const head = document.createElement("div");
   head.className = "mem-item-head";
@@ -787,6 +795,7 @@ function buildMemItem(it) {
     parts.push(`相似度 ${Math.round(it.score * 100)}%`);
   }
   parts.push(it.kind || "context");
+  parts.push(evidenceLabel(it));
   if (it.importance) parts.push(it.importance);
   meta.textContent = parts.join(" · ");
 
@@ -804,7 +813,35 @@ function buildMemItem(it) {
   });
   row.appendChild(head);
   row.appendChild(meta);
-  row.appendChild(content);
+  const fragments = matchingFragments(it.content, query);
+  const previews = document.createElement("div");
+  previews.className = "mem-fragments";
+  const highlight = (element, text) => {
+    const pattern = queryPattern(query);
+    let cursor = 0;
+    for (const match of pattern ? text.matchAll(pattern) : []) {
+      element.append(document.createTextNode(text.slice(cursor, match.index)));
+      const mark = document.createElement("mark"); mark.textContent = match[0]; element.append(mark);
+      cursor = match.index + match[0].length;
+    }
+    element.append(document.createTextNode(text.slice(cursor)));
+  };
+  for (const fragment of fragments) {
+    const button = document.createElement("button"); button.type = "button"; button.className = "mem-fragment";
+    const source = document.createElement("small");
+    source.textContent = [fragment.time, (it.id || "").slice(0, 8), "查看原文"].filter(Boolean).join(" · ");
+    button.append(source); highlight(button, fragment.text);
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      row.classList.add("expanded"); row.setAttribute("aria-expanded", "true");
+      content.replaceChildren(document.createTextNode((it.content || "").slice(0, fragment.start)));
+      const target = document.createElement("span"); highlight(target, fragment.text); content.append(target);
+      content.append(document.createTextNode((it.content || "").slice(fragment.end)));
+      requestAnimationFrame(() => target.scrollIntoView({block:"center"}));
+    });
+    previews.append(button);
+  }
+  row.append(previews, content);
 
   if (it.superseded_by) {
     const note = document.createElement("div");
@@ -866,7 +903,7 @@ function renderSearch(response) {
   searchStatus.className = "browse-status memory-status";
   searchStatus.title = response?.message || "";
   searchStatus.textContent = (response?.mode === "quick" ? "全库关键词匹配 " : response?.mode === "recall" ? "语义匹配 " : "精确匹配 ") + items.length + " 条" + (searchMode === "tree" && items.length ? response.pathIncomplete ? " · 上级路径未能读取" : memoryCatalog ? " · 保留上级路径" : " · 正在补全上级路径" : "");
-  renderMemoryCollection(searchList, items, searchMode, searchCollapsed, true, "没有匹配的记忆。");
+  renderMemoryCollection(searchList, items, searchMode, searchCollapsed, true, "没有匹配的记忆。", response?.mode === "quick" ? response.query : "");
 }
 
 // ---- 提醒：含【触发】日期的 task 到期核对 ----
@@ -1345,6 +1382,48 @@ async function resetTargets() {
 }
 
 // ---- 层一切换 ----
+function updateDestination() {
+  $("#write-destination").textContent = autoMode
+    ? "去向：自动判断；需要指定上级时请关闭自动化。主记忆仍需核实，日记仅作参考。"
+    : selectedTarget === "journal"
+      ? "去向：当日活动轨迹（日记），不挂到主记忆树。"
+      : "去向：主记忆 / " + (selectedParent?.title || selectedTree || "请选择上级");
+}
+async function searchParents() {
+  const query = $("#parent-query").value.trim();
+  const container = $("#parent-results"); container.replaceChildren();
+  if (!query) return;
+  try {
+    await ensureMemoryCatalog();
+    if ($("#parent-query").value.trim() !== query) return;
+    const items = selectMemories(memoryCatalog || [], {query}).filter(it => !isDiary(it) && !it.superseded_by).slice(0, 12);
+    for (const item of items) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "tree-chip";
+      button.textContent = (item.title || "无标题") + " · " + item.id.slice(0, 8);
+      button.addEventListener("click", () => {
+        selectedParent = {id:item.id, title:item.title};
+        treeGroups.querySelectorAll(".tree-chip").forEach(chip => chip.classList.remove("active"));
+        container.replaceChildren(); $("#parent-query").value = ""; updateDestination();
+      });
+      container.append(button);
+    }
+    if (!items.length) container.textContent = "没有可选的有效主记忆节点。";
+  } catch (error) { container.textContent = "读取上级失败：" + String(error?.message || error); }
+}
+async function viewSavedMemory(id) {
+  browseDirty = true; catalogRevision++;
+  switchView("search"); searchInput.value = id;
+  searchKindValue = "quick";
+  searchKind.querySelectorAll("[data-kind]").forEach(button => {
+    const active = button.dataset.kind === "quick"; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active));
+  });
+  $("#search-count-wrap").classList.add("hidden");
+  searchInput.placeholder = "快速搜索全部记忆的标题、正文或 id";
+  await runSearch();
+  const card = [...searchList.querySelectorAll(".mem-item")].find(item => item.dataset.memoryId === id);
+  if (card) { card.classList.add("expanded"); card.setAttribute("aria-expanded", "true"); card.scrollIntoView({block:"center"}); }
+}
+
 function setTarget(target) {
   selectedTarget = target;
   document.querySelectorAll(".seg-btn").forEach((b) =>
@@ -1363,6 +1442,7 @@ function setTarget(target) {
     if (first) selectTree(first);
   }
   updateTriggerRow(false);
+  updateDestination();
 }
 
 // ---- 自动化开关 ----
@@ -1371,6 +1451,7 @@ function setAuto(on) {
   autoSwitch.checked = autoMode;
   const modelJudges =
     !!appConfig.llm_enabled && appConfig.automation_mode !== "local-fallback";
+  updateDestination();
   autoState.textContent = autoMode
     ? modelJudges
       ? "模型判档·判树"
@@ -1582,7 +1663,7 @@ async function submit() {
     setResult("err", "内容过长", `已 ${content.length} 字，超过 8000 字上限；请拆分后分条记录。`);
     return;
   }
-  if (!autoMode && selectedTarget === "main" && !selectedTree) {
+  if (!autoMode && selectedTarget === "main" && !selectedTree && !selectedParent) {
     setResult("warn", "未选择分类", "主区需要选择一棵分类树，或切换为日记。");
     return;
   }
@@ -1599,7 +1680,7 @@ async function submit() {
       const res = await invoke()("submit_memory", {
         target: selectedTarget,
         content,
-        tree: selectedTarget === "main" ? selectedTree : null,
+        tree: selectedTarget === "main" ? (selectedParent?.id || selectedTree) : null,
         type: selectedTarget === "main" ? selectedType : null,
         trigger,
       });
@@ -1664,9 +1745,14 @@ async function showDone(action, id, parent, message, branch, importance, title, 
   body += await donePathLines(id, parent, branch);
   setResult("ok", "已落库 ✓", body);
   flashOk();
-  if (appConfig.submit_close) {
-    setTimeout(() => hideWindow(), 1200);
+  if (id) {
+    const view = document.createElement("button"); view.type = "button"; view.className = "mini-btn";
+    view.textContent = "查看记录 · " + id.slice(0, 8);
+    view.addEventListener("click", () => { void viewSavedMemory(id); });
+    resultArea.appendChild(view);
   }
+  // 保留保存位置和查看入口，避免用户尚未看清回执窗口就消失。
+
 }
 
 /// 结果里的挂点可视化：祖先路径 + attach 时的目标树局部
@@ -1974,6 +2060,11 @@ async function installUpdate() {
 
 // ---- 初始化 ----
 async function init() {
+  $("#browse-source").addEventListener("change", renderRecent);
+  let parentTimer;
+  $("#parent-query").addEventListener("input", () => {
+    clearTimeout(parentTimer); parentTimer = setTimeout(searchParents, 180);
+  });
   if (window.__memtoolsInit) return;
   window.__memtoolsInit = true;
   // 兜底守卫：Tauri 2 默认不注入 window.__TAURI__（需 withGlobalTauri: true）。
@@ -2261,6 +2352,13 @@ async function init() {
       } else if (currentView === "remind") {
         loadReminders();
       }
+    });
+  } catch (_) {}
+
+  try {
+    await listen()("selection-view-memory", ev => {
+      const id = String(ev?.payload || "");
+      if (/^[a-f0-9-]{8,}$/i.test(id)) void viewSavedMemory(id);
     });
   } catch (_) {}
 

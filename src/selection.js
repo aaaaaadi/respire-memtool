@@ -5,6 +5,7 @@
 
 const state = {
   text: "",
+  savedId: null,
   source: "",
   expanded: false,
   busy: false,
@@ -83,7 +84,7 @@ function updateButtons() {
     journal.disabled = state.busy || !hasText;
     journal.textContent = state.busy ? "保存中…" : "存为日记";
   }
-  if (edit) edit.disabled = state.busy || !hasText;
+  if (edit) { edit.disabled = state.busy || !hasText; edit.textContent = "编辑"; }
 }
 
 function renderPayload() {
@@ -117,6 +118,7 @@ function applyPayload(payload) {
   const text = payload && typeof payload.text === "string" ? payload.text : "";
   const source = payload && typeof payload.source === "string" ? payload.source : "";
   state.text = text;
+  state.savedId = null;
   state.source = source;
   renderPayload();
 }
@@ -250,26 +252,6 @@ async function onOrbClick() {
   }
 }
 
-async function hideAfterSave(epoch) {
-  let failure = "";
-  try {
-    await call("selection_hide");
-  } catch (err) {
-    failure = "已存为日记 ✓（未能自动关闭：" + messageOf(err) + "）";
-  }
-
-  if (epoch !== state.epoch) return;
-
-  if (failure) {
-    state.busy = false;
-    updateButtons();
-    setStatus(failure, "warn");
-    return;
-  }
-
-  enterCollapsed();
-}
-
 async function onJournal() {
   if (state.busy) return;
   const text = state.text;
@@ -301,11 +283,10 @@ async function onJournal() {
     }
     setStatus("已存为日记 ✓", "ok");
 
-    state.hideTimer = window.setTimeout(() => {
-      state.hideTimer = 0;
-      if (epoch !== state.epoch) return;
-      void hideAfterSave(epoch);
-    }, 1100);
+    state.savedId = typeof result.id === "string" && /^[a-f0-9-]{8,}$/i.test(result.id) ? result.id : null;
+    const edit = $("btn-edit");
+    if (edit) { edit.disabled = !state.savedId; edit.textContent = "查看记录"; }
+    setStatus(state.savedId ? "已存 · " + state.savedId.slice(0, 8) + " · 当日日记" : "已返回成功，但未提供记录 ID；请在最近记忆中查询", "ok");
   } catch (err) {
     if (epoch !== state.epoch) return;
     state.busy = false;
@@ -324,7 +305,7 @@ async function onEdit() {
   const epoch = state.epoch;
   state.opening = true;
   try {
-    await call("selection_open_main", { text: state.text });
+    await call("selection_open_main", state.savedId ? { memoryId: state.savedId } : { text: state.text });
   } catch (err) {
     if (epoch === state.epoch) {
       setStatus("打开主窗失败：" + messageOf(err), "err");

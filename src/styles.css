@@ -1725,3 +1725,10 @@ button:focus-visible, .mem-item:focus-visible { outline: 2px solid var(--accent)
 /* 图谱背景始终为深色，详情文字固定为浅色，避免系统浅色主题造成冲突。 */
 .graph-detail { color: #edf3ff; }
 .graph-detail-meta, .graph-detail-body { color: #b7c4d8; }
+
+/* 命中预览只显示少量上下文，展开后在原文定位。 */
+.mem-fragments { display:grid; gap:6px; margin-top:6px; }
+.mem-fragment { text-align:left; white-space:pre-wrap; padding:7px 9px; border:1px solid var(--border, #d5d9e6); border-radius:8px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+.mem-fragment small { display:block; opacity:.75; margin-bottom:3px; }
+.mem-item mark { background:#e9c86a; color:#202433; border-radius:2px; }
+.mem-item.expanded .mem-fragments { display:none; }

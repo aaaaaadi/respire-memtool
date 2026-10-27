@@ -684,9 +684,16 @@ fn selection_open_main(
     app: AppHandle,
     sel: tauri::State<'_, Arc<selection::SelectionState>>,
     text: Option<String>,
+    memory_id: Option<String>,
 ) {
     let target = text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     open_main_window(&app, target.as_deref());
+    // 保存回执的实际 ID 只用于定位已存记录，不预填或覆盖未提交输入。
+    if let Some(id) = memory_id.filter(|id| id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')) {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.emit("selection-view-memory", id);
+        }
+    }
     selection::hide_selector(&app, sel.inner());
 }
 
