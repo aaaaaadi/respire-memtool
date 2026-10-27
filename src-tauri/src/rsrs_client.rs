@@ -533,8 +533,13 @@ impl RsrsClient {
         }
         let st = env.status.clone().unwrap_or_default();
         let st_lc = st.to_lowercase();
-        // 允许 ok 与 pending（候选悬空）；其余状态视为错误
-        if !st.is_empty() && st_lc != "ok" && st_lc != "pending" {
+        // recall 的零命中使用 skip，不是提交失败。仅放行明确的空召回；
+        // 写入工具、缺少计数或自相矛盾的结果仍报错，不能把“跳过写入”当成功。
+        let empty_recall = tool == self.tools.recall
+            && st_lc == "skip"
+            && env.summary.as_ref().and_then(|s| s.get("count")).and_then(|v| v.as_u64()) == Some(0)
+            && env.details.as_ref().map_or(true, |v| v.as_array().map_or(false, |items| items.is_empty()));
+        if !st.is_empty() && st_lc != "ok" && st_lc != "pending" && !empty_recall {
             let msg = format!("工具 {tool} status={st}");
             if looks_like_auth(&msg) {
                 return Err(RsrsError::AuthFailed(msg));
@@ -1161,3 +1166,7 @@ fn looks_like_candidate(s: &str) -> bool {
 fn is_nonfatal_warning(s: &str) -> bool {
     s.to_lowercase().contains("continuing")
 }
+
+#[cfg(test)]
+#[path = "rsrs_client_recall_tests.rs"]
+mod recall_regressions;
